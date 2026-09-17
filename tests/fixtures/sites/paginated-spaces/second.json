@@ -1,0 +1,19 @@
+{
+  "results": [
+    {
+      "id": "333",
+      "key": "~alice",
+      "name": "Alice",
+      "type": "personal",
+      "status": "current"
+    },
+    {
+      "id": "444",
+      "key": "TEAM",
+      "name": "Team Space",
+      "type": "global",
+      "status": "current"
+    }
+  ],
+  "_links": {}
+}

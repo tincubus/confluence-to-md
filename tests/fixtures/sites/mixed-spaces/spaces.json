@@ -1,0 +1,26 @@
+{
+  "results": [
+    {
+      "id": "111",
+      "key": "ENG",
+      "name": "Engineering",
+      "type": "global",
+      "status": "current"
+    },
+    {
+      "id": "222",
+      "key": "OLD",
+      "name": "Archived Space",
+      "type": "global",
+      "status": "archived"
+    },
+    {
+      "id": "333",
+      "key": "~alice",
+      "name": "Alice",
+      "type": "personal",
+      "status": "current"
+    }
+  ],
+  "_links": {}
+}

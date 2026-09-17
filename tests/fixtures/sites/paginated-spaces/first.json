@@ -1,0 +1,21 @@
+{
+  "results": [
+    {
+      "id": "111",
+      "key": "ENG",
+      "name": "Engineering",
+      "type": "global",
+      "status": "current"
+    },
+    {
+      "id": "222",
+      "key": "OLD",
+      "name": "Archived Space",
+      "type": "global",
+      "status": "archived"
+    }
+  ],
+  "_links": {
+    "next": "/wiki/api/v2/spaces?cursor=second"
+  }
+}
