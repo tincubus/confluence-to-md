@@ -389,3 +389,431 @@ def test_export_writes_several_spaces_as_sibling_folders(monkeypatch, tmp_path):
     assert code == 0
     assert (vault / "Engineering" / "Home" / "Home.md").is_file()
     assert (vault / "Team" / "Team Home" / "Team Home.md").is_file()
+
+
+def test_export_rewrites_in_selection_page_link_to_relative_markdown(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>See "
+        "<ac:link>"
+        '<ri:page ri:content-title="Run book" ri:space-key="ENG" />'
+        "<ac:plain-text-link-body><![CDATA[the runbook]]></ac:plain-text-link-body>"
+        "</ac:link>"
+        ".</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("100", "Home", body=home_body),
+                make_page("200", "Run book", parent_id="100", position=0),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    home = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+    body = home.split("---", 2)[2]
+
+    assert code == 0
+    assert "[the runbook](Run%20book/Run%20book.md)" in body
+    assert "[[" not in body
+    assert "ac:link" not in body
+
+
+def test_export_keeps_heading_fragment_as_percent_encoded_text(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        '<ac:link ac:anchor="Setup steps">'
+        '<ri:page ri:content-title="Run book" ri:space-key="ENG" />'
+        "<ac:plain-text-link-body><![CDATA[setup]]></ac:plain-text-link-body>"
+        "</ac:link>"
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("100", "Home", body=home_body),
+                make_page("200", "Run book", parent_id="100", position=0),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    body = (
+        (vault / "Engineering" / "Home" / "Home.md")
+        .read_text(encoding="utf-8")
+        .split("---", 2)[2]
+    )
+
+    assert code == 0
+    assert "[setup](Run%20book/Run%20book.md#Setup%20steps)" in body
+    assert "setup-steps" not in body
+
+
+def test_export_keeps_out_of_selection_and_non_page_urls(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        "<ac:link>"
+        '<ri:page ri:content-title="Outside" ri:space-key="ENG" />'
+        "<ac:plain-text-link-body><![CDATA[missing]]></ac:plain-text-link-body>"
+        "</ac:link>"
+        ' <a href="https://example.com/docs">docs</a>'
+        ' <a href="mailto:ops@example.com">mail</a>'
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+        outside = f"{site}/wiki/spaces/ENG/pages/Outside"
+
+    body = (
+        (vault / "Engineering" / "Home" / "Home.md")
+        .read_text(encoding="utf-8")
+        .split("---", 2)[2]
+    )
+
+    assert code == 0
+    assert f"[missing]({outside})" in body
+    assert '<a href="https://example.com/docs">docs</a>' in body
+    assert '<a href="mailto:ops@example.com">mail</a>' in body
+    assert list(vault.rglob("*.md")) == [vault / "Engineering" / "Home" / "Home.md"]
+
+
+def test_export_replaces_user_mention_with_display_name(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>Owner "
+        "<ac:link>"
+        '<ri:user ri:account-id="ada-1" />'
+        "<ac:link-body>Ada Lovelace</ac:link-body>"
+        "</ac:link>"
+        ".</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    body = (
+        (vault / "Engineering" / "Home" / "Home.md")
+        .read_text(encoding="utf-8")
+        .split("---", 2)[2]
+    )
+
+    assert code == 0
+    assert "Ada Lovelace" in body
+    assert "ri:user" not in body
+    assert "ada-1" not in body
+    assert list(vault.rglob("*.md")) == [vault / "Engineering" / "Home" / "Home.md"]
+
+
+def test_export_rewrites_include_excerpt_and_smart_link(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        '<ac:structured-macro ac:name="include">'
+        '<ac:parameter ac:name="">'
+        '<ri:page ri:content-title="Run book" ri:space-key="ENG" />'
+        "</ac:parameter>"
+        "</ac:structured-macro>"
+        "</p>"
+        "<p>"
+        '<ac:structured-macro ac:name="excerpt-include">'
+        '<ac:parameter ac:name="">'
+        '<ri:page ri:content-title="Outside" ri:space-key="ENG" />'
+        "</ac:parameter>"
+        "</ac:structured-macro>"
+        "</p>"
+        "<p>"
+        '<ac:structured-macro ac:name="smart-link">'
+        "</ac:structured-macro>"
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("100", "Home", body=home_body),
+                make_page(
+                    "200",
+                    "Run book",
+                    parent_id="100",
+                    position=0,
+                    body="<p>Runbook secret</p>",
+                ),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+        outside = f"{site}/wiki/spaces/ENG/pages/Outside"
+
+    home = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+    body = home.split("---", 2)[2]
+    run_book = (vault / "Engineering" / "Home" / "Run book" / "Run book.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert code == 0
+    converted, _, _ = body.partition("<!-- confluence-to-md:children -->")
+    assert "[Run book](Run%20book/Run%20book.md)" in converted
+    assert f"[Outside]({outside})" in converted
+    assert "Placeholder: smart-link" in converted
+    assert "Runbook secret" in run_book
+    assert "Runbook secret" not in converted
+    assert "ac:structured-macro" not in converted
+
+
+def test_export_reports_same_site_external_link(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        "<ac:link>"
+        '<ri:page ri:content-title="Outside" ri:space-key="ENG" />'
+        "<ac:plain-text-link-body><![CDATA[missing]]></ac:plain-text-link-body>"
+        "</ac:link>"
+        ' <a href="https://example.com/docs">docs</a>'
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+        outside = f"{site}/wiki/spaces/ENG/pages/Outside"
+
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "100" in captured.out
+    assert outside in captured.out
+    assert "https://example.com/docs" not in captured.out
+    assert list(vault.rglob("*.md")) == [vault / "Engineering" / "Home" / "Home.md"]
+
+
+def test_export_relative_page_links_do_not_contain_site_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    run_body = (
+        "<p>"
+        "<ac:link>"
+        '<ri:page ri:content-title="Home" ri:space-key="ENG" />'
+        "<ac:plain-text-link-body><![CDATA[home]]></ac:plain-text-link-body>"
+        "</ac:link>"
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("100", "Home"),
+                make_page(
+                    "200", "Run book", parent_id="100", position=0, body=run_body
+                ),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    body = (
+        (vault / "Engineering" / "Home" / "Run book" / "Run book.md")
+        .read_text(encoding="utf-8")
+        .split("---", 2)[2]
+    )
+
+    assert code == 0
+    assert "[home](../Home.md)" in body
+    assert f"]({site}" not in body.replace(f"[Run book]({site}", "", 1)
+
+
+def test_export_rewrites_html_page_url_and_smart_link_url(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        '<a href="/wiki/spaces/ENG/pages/200/Run+book">run</a>'
+        "</p>"
+        "<p>"
+        '<a href="/wiki/spaces/ENG/pages/999/Outside">gone</a>'
+        "</p>"
+        "<p>"
+        '<ac:structured-macro ac:name="smart-link">'
+        '<ac:parameter ac:name="url">/wiki/spaces/ENG/pages/200/Run+book</ac:parameter>'
+        "</ac:structured-macro>"
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("100", "Home", body=home_body),
+                make_page("200", "Run book", parent_id="100", position=0),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+        outside = f"{site}/wiki/spaces/ENG/pages/999/Outside"
+
+    captured = capsys.readouterr()
+    converted, _, _ = (
+        (vault / "Engineering" / "Home" / "Home.md")
+        .read_text(encoding="utf-8")
+        .split("---", 2)[2]
+        .partition("<!-- confluence-to-md:children -->")
+    )
+
+    assert code == 0
+    assert converted.count("[run](Run%20book/Run%20book.md)") == 1
+    assert converted.count("[Run book](Run%20book/Run%20book.md)") == 1
+    assert f"[gone]({outside})" in converted
+    assert "100" in captured.out
+    assert outside in captured.out
+    assert "ac:structured-macro" not in converted
+
+
+def test_export_rewrites_page_link_across_spaces_in_selection(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        "<ac:link>"
+        '<ri:page ri:content-title="Team Home" ri:space-key="TEAM" />'
+        "<ac:plain-text-link-body><![CDATA[team]]></ac:plain-text-link-body>"
+        "</ac:link>"
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": {
+            "results": [
+                {
+                    "id": "111",
+                    "key": "ENG",
+                    "name": "Engineering",
+                    "type": "global",
+                    "status": "current",
+                },
+                {
+                    "id": "222",
+                    "key": "TEAM",
+                    "name": "Team",
+                    "type": "global",
+                    "status": "current",
+                },
+            ],
+            "_links": {},
+        },
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+        "/wiki/api/v2/spaces/222/pages": {
+            "results": [
+                make_page("200", "Team Home", space_key="TEAM", space_id="222")
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG", "TEAM"])
+
+    body = (
+        (vault / "Engineering" / "Home" / "Home.md")
+        .read_text(encoding="utf-8")
+        .split("---", 2)[2]
+    )
+
+    assert code == 0
+    assert "[team](../../Team/Team%20Home/Team%20Home.md)" in body
+
+
+def test_export_rewrites_content_id_page_link(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        "<ac:link>"
+        '<ri:content ri:id="200" />'
+        "<ac:plain-text-link-body><![CDATA[run]]></ac:plain-text-link-body>"
+        "</ac:link>"
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("100", "Home", body=home_body),
+                make_page("200", "Run book", parent_id="100", position=0),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    converted, _, _ = (
+        (vault / "Engineering" / "Home" / "Home.md")
+        .read_text(encoding="utf-8")
+        .split("---", 2)[2]
+        .partition("<!-- confluence-to-md:children -->")
+    )
+
+    assert code == 0
+    assert "[run](Run%20book/Run%20book.md)" in converted
