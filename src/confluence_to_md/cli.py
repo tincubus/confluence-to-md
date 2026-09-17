@@ -51,13 +51,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Vault root directory",
     )
     export_parser.add_argument(
-        "space_key",
-        help="Space key to Export",
+        "space_keys",
+        metavar="space_key",
+        nargs="+",
+        help="Space key to Export. Repeat for several Spaces in one Vault.",
     )
     args = parser.parse_args(argv)
     if args.command == "list":
         return list_spaces(args.site)
-    return export_space(args.site, args.vault, args.space_key)
+    return export_spaces(args.site, args.vault, args.space_keys)
 
 
 def load_credentials() -> tuple[str, str] | None:
@@ -108,7 +110,24 @@ def list_spaces(site: str) -> int:
     return 0
 
 
-def export_space(site: str, vault: str, space_key: str) -> int:
+def folder_name(title: str, page_id: str, used: set[str]) -> str:
+    name = title.strip()
+    for char in '\\/:*?"<>|':
+        name = name.replace(char, "-")
+    if not name or name.lower() in used:
+        name = f"{name} ({page_id})"
+    used.add(name.lower())
+    return name
+
+
+def sibling_sort_key(page: dict) -> tuple:
+    position = page.get("position")
+    if position is None:
+        return (1, 0, page["title"])
+    return (0, position, page["title"])
+
+
+def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
     account = load_credentials()
     if account is None:
         return 1
@@ -128,54 +147,97 @@ def export_space(site: str, vault: str, space_key: str) -> int:
         with urllib.request.urlopen(request, timeout=60) as response:
             return json.load(response)
 
-    try:
-        spaces = fetch_json(
-            f"{site}/wiki/api/v2/spaces?keys={quote(space_key, safe='')}&limit=250"
-        )
-        space = next(
-            (item for item in spaces["results"] if item["key"] == space_key), None
-        )
-        if space is None:
-            print(
-                f"Could not Export the Selection: Space {space_key} was not found",
-                file=sys.stderr,
-            )
-            return 1
-        pages = fetch_json(
-            f"{site}/wiki/api/v2/spaces/{space['id']}/pages"
-            "?body-format=storage&limit=250"
-        )
-    except urllib.error.URLError as err:
-        print(f"Could not Export the Selection: {err.reason}", file=sys.stderr)
-        return 1
-
     vault_root = Path(vault)
-    for page in pages["results"]:
-        title = page["title"]
-        page_id = str(page["id"])
-        source_url = f"{site}/wiki{page['_links']['webui']}"
-        folder = vault_root / space["name"] / title
-        folder.mkdir(parents=True, exist_ok=True)
-        fields = {
-            "title": title,
-            "confluence_id": page_id,
-            "space_key": space_key,
-            "source_url": source_url,
-        }
-        parent_id = page.get("parentId")
-        if parent_id:
-            fields["parent_id"] = str(parent_id)
-        fields["updated_at"] = page["version"]["createdAt"]
-        lines = ["---"]
-        for key, value in fields.items():
-            lines.append(f"{key}: {json.dumps(value)}")
-        lines.append("---")
-        lines.append("")
-        lines.append(f"[{title}]({source_url})")
-        lines.append("")
-        lines.append(page["body"]["storage"]["value"])
-        lines.append("")
-        (folder / f"{title}.md").write_text("\n".join(lines), encoding="utf-8")
+    for space_key in space_keys:
+        try:
+            spaces = fetch_json(
+                f"{site}/wiki/api/v2/spaces?keys={quote(space_key, safe='')}&limit=250"
+            )
+            space = next(
+                (item for item in spaces["results"] if item["key"] == space_key),
+                None,
+            )
+            if space is None:
+                print(
+                    f"Could not Export the Selection: Space {space_key} was not found",
+                    file=sys.stderr,
+                )
+                return 1
+            pages = fetch_json(
+                f"{site}/wiki/api/v2/spaces/{space['id']}/pages"
+                "?body-format=storage&limit=250"
+            )
+        except urllib.error.URLError as err:
+            print(f"Could not Export the Selection: {err.reason}", file=sys.stderr)
+            return 1
+
+        space_folder = vault_root / space["name"]
+        space_folder.mkdir(parents=True, exist_ok=True)
+        pages_by_id = {str(page["id"]): page for page in pages["results"]}
+        children_of: dict[str, list[dict]] = {}
+        roots: list[dict] = []
+        for page in pages["results"]:
+            parent_id = page.get("parentId")
+            if parent_id and str(parent_id) in pages_by_id:
+                children_of.setdefault(str(parent_id), []).append(page)
+            else:
+                roots.append(page)
+        folder_names: dict[str, str] = {}
+        for group in (roots, *children_of.values()):
+            group.sort(key=sibling_sort_key)
+            used: set[str] = set()
+            for page in group:
+                page_id = str(page["id"])
+                folder_names[page_id] = folder_name(page["title"], page_id, used)
+        for page in pages["results"]:
+            title = page["title"]
+            page_id = str(page["id"])
+            source_url = f"{site}/wiki{page['_links']['webui']}"
+            parts: list[str] = []
+            current = page
+            while True:
+                current_id = str(current["id"])
+                parts.append(folder_names[current_id])
+                parent_id = current.get("parentId")
+                if not parent_id or str(parent_id) not in pages_by_id:
+                    break
+                current = pages_by_id[str(parent_id)]
+            parts.reverse()
+            name = parts[-1]
+            folder = space_folder / Path(*parts)
+            folder.mkdir(parents=True, exist_ok=True)
+            fields = {
+                "title": title,
+                "confluence_id": page_id,
+                "space_key": space_key,
+                "source_url": source_url,
+            }
+            parent_id = page.get("parentId")
+            if parent_id:
+                fields["parent_id"] = str(parent_id)
+            fields["updated_at"] = page["version"]["createdAt"]
+            lines = ["---"]
+            for key, value in fields.items():
+                lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+            lines.append("---")
+            lines.append("")
+            lines.append(f"[{title}]({source_url})")
+            lines.append("")
+            lines.append(page["body"]["storage"]["value"])
+            lines.append("")
+            children = children_of.get(page_id, [])
+            if children:
+                lines.append("<!-- confluence-to-md:children -->")
+                lines.append("## Child pages")
+                for child in children:
+                    child_name = folder_names[str(child["id"])]
+                    rel = (
+                        f"{quote(child_name, safe='')}/{quote(child_name, safe='')}.md"
+                    )
+                    lines.append(f"- [{child['title']}]({rel})")
+                lines.append("<!-- /confluence-to-md:children -->")
+                lines.append("")
+            (folder / f"{name}.md").write_text("\n".join(lines), encoding="utf-8")
     return 0
 
 

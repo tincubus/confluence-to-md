@@ -59,6 +59,49 @@ def one_page_routes() -> dict[str, Any]:
     }
 
 
+def make_page(
+    page_id: str,
+    title: str,
+    *,
+    space_key: str = "ENG",
+    space_id: str = "111",
+    parent_id: str | None = None,
+    position: int | None = 0,
+    body: str = "<p>Welcome</p>",
+) -> dict[str, Any]:
+    return {
+        "id": page_id,
+        "status": "current",
+        "title": title,
+        "spaceId": space_id,
+        "parentId": parent_id,
+        "position": position,
+        "createdAt": "2026-09-17T04:00:00.000Z",
+        "version": {
+            "createdAt": "2026-09-17T04:00:00Z",
+            "number": 1,
+            "minorEdit": False,
+        },
+        "body": {"storage": {"representation": "storage", "value": body}},
+        "_links": {"webui": f"/spaces/{space_key}/pages/{page_id}/{title}"},
+    }
+
+
+def hierarchy_routes() -> dict[str, Any]:
+    return {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("200", "Alpha", parent_id="100", position=1),
+                make_page("400", "Grand", parent_id="200", position=0),
+                make_page("100", "Home"),
+                make_page("300", "Run book", parent_id="100", position=0),
+            ],
+            "_links": {},
+        },
+    }
+
+
 def test_export_fails_when_credentials_are_missing(monkeypatch, tmp_path, capsys):
     monkeypatch.delenv("CONFLUENCE_EMAIL", raising=False)
     monkeypatch.delenv("CONFLUENCE_API_TOKEN", raising=False)
@@ -117,3 +160,232 @@ def test_export_writes_one_note_for_one_page(monkeypatch, tmp_path, capsys):
     assert TOKEN not in captured.out + captured.err
     assert EMAIL not in text
     assert TOKEN not in text
+
+
+def test_export_sanitizes_slash_in_page_title(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = one_page_routes()
+    page = routes["/wiki/api/v2/spaces/111/pages"]["results"][0]
+    page["title"] = "Competitor Research (ข้อมูลคู่แข่ง/Market)"
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    folder = vault / "Engineering" / "Competitor Research (ข้อมูลคู่แข่ง-Market)"
+    note = folder / "Competitor Research (ข้อมูลคู่แข่ง-Market).md"
+
+    assert code == 0
+    assert note.is_file()
+    assert 'title: "Competitor Research (ข้อมูลคู่แข่ง/Market)"' in note.read_text(
+        encoding="utf-8"
+    )
+    assert not (vault / "Engineering" / "Competitor Research (ข้อมูลคู่แข่ง").exists()
+
+
+def test_export_nests_homepage_children_and_grandchild(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    vault = tmp_path / "vault"
+
+    with serve_site(hierarchy_routes()) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    homepage = vault / "Engineering" / "Home" / "Home.md"
+    assert code == 0
+    assert homepage.is_file()
+    assert (vault / "Engineering" / "Home" / "Run book" / "Run book.md").is_file()
+    assert (vault / "Engineering" / "Home" / "Alpha" / "Alpha.md").is_file()
+    assert (vault / "Engineering" / "Home" / "Alpha" / "Grand" / "Grand.md").is_file()
+    assert not (vault / "Engineering" / "Home" / "index.md").exists()
+    assert not (vault / "Engineering" / "Alpha").exists()
+    assert not (vault / "Engineering" / "Run book").exists()
+    assert not (vault / "Engineering" / "Grand").exists()
+    assert list(vault.rglob("index.md")) == []
+
+
+def test_export_child_pages_section_uses_sibling_order_and_omits_leaves(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    vault = tmp_path / "vault"
+
+    with serve_site(hierarchy_routes()) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    home = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+    alpha = (vault / "Engineering" / "Home" / "Alpha" / "Alpha.md").read_text(
+        encoding="utf-8"
+    )
+    run_book = (vault / "Engineering" / "Home" / "Run book" / "Run book.md").read_text(
+        encoding="utf-8"
+    )
+    grand = (vault / "Engineering" / "Home" / "Alpha" / "Grand" / "Grand.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert code == 0
+    assert (
+        "<!-- confluence-to-md:children -->\n"
+        "## Child pages\n"
+        "- [Run book](Run%20book/Run%20book.md)\n"
+        "- [Alpha](Alpha/Alpha.md)\n"
+        "<!-- /confluence-to-md:children -->"
+    ) in home
+    assert (
+        "<!-- confluence-to-md:children -->\n"
+        "## Child pages\n"
+        "- [Grand](Grand/Grand.md)\n"
+        "<!-- /confluence-to-md:children -->"
+    ) in alpha
+    assert "confluence-to-md:children" not in run_book
+    assert "confluence-to-md:children" not in grand
+    assert "## Child pages" not in run_book
+    assert "## Child pages" not in grand
+
+
+def test_export_makes_sibling_folder_names_unique_ignoring_case(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("1", "Home"),
+                make_page("10", "Notes", parent_id="1", position=0),
+                make_page("11", "notes", parent_id="1", position=1),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    home = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+    first = vault / "Engineering" / "Home" / "Notes" / "Notes.md"
+    second = vault / "Engineering" / "Home" / "notes (11)" / "notes (11).md"
+
+    assert code == 0
+    assert first.is_file()
+    assert second.is_file()
+    assert 'confluence_id: "10"' in first.read_text(encoding="utf-8")
+    assert 'confluence_id: "11"' in second.read_text(encoding="utf-8")
+    assert (
+        "<!-- confluence-to-md:children -->\n"
+        "## Child pages\n"
+        "- [Notes](Notes/Notes.md)\n"
+        "- [notes](notes%20%2811%29/notes%20%2811%29.md)\n"
+        "<!-- /confluence-to-md:children -->"
+    ) in home
+
+
+def test_export_appends_page_id_when_folder_name_is_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = one_page_routes()
+    page = routes["/wiki/api/v2/spaces/111/pages"]["results"][0]
+    page["title"] = "   "
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    note = vault / "Engineering" / " (123456)" / " (123456).md"
+    text = note.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert note.is_file()
+    assert 'title: "   "' in text
+    assert 'confluence_id: "123456"' in text
+
+
+def test_export_places_page_under_space_when_parent_is_outside_selection(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("500", "Orphan", parent_id="999")],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    note = vault / "Engineering" / "Orphan" / "Orphan.md"
+    text = note.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert note.is_file()
+    assert 'parent_id: "999"' in text
+    assert not (vault / "Engineering" / "Home").exists()
+
+
+def test_export_creates_space_folder_without_inventing_homepage(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {"results": [], "_links": {}},
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    space_folder = vault / "Engineering"
+    assert code == 0
+    assert space_folder.is_dir()
+    assert list(space_folder.rglob("*.md")) == []
+
+
+def test_export_writes_several_spaces_as_sibling_folders(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": {
+            "results": [
+                {
+                    "id": "111",
+                    "key": "ENG",
+                    "name": "Engineering",
+                    "type": "global",
+                    "status": "current",
+                },
+                {
+                    "id": "222",
+                    "key": "TEAM",
+                    "name": "Team",
+                    "type": "global",
+                    "status": "current",
+                },
+            ],
+            "_links": {},
+        },
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home")],
+            "_links": {},
+        },
+        "/wiki/api/v2/spaces/222/pages": {
+            "results": [
+                make_page("200", "Team Home", space_key="TEAM", space_id="222")
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG", "TEAM"])
+
+    assert code == 0
+    assert (vault / "Engineering" / "Home" / "Home.md").is_file()
+    assert (vault / "Team" / "Team Home" / "Team Home.md").is_file()
