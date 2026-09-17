@@ -1295,6 +1295,60 @@ def test_export_sanitizes_attachment_names_keeps_emoji_and_appends_id_on_collisi
     assert "- [report-q1.pdf](attachments/report-q1%20%28att-b%29.pdf)" in text
 
 
+def test_export_body_link_to_duplicate_filename_uses_lowest_attachment_id(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        '<p><ac:image ac:alt="dup">'
+        '<ri:attachment ri:filename="dup.png" /></ac:image></p>'
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+        "/wiki/api/v2/pages/100/attachments": {
+            "results": [
+                make_attachment(
+                    "att-a",
+                    "dup.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/dup-a.png",
+                ),
+                make_attachment(
+                    "att-m",
+                    "dup.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/dup-m.png",
+                ),
+            ],
+            "_links": {},
+        },
+        "/wiki/download/attachments/100/dup-a.png": b"a-bytes",
+        "/wiki/download/attachments/100/dup-m.png": b"m-bytes",
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    files = vault / "Engineering" / "Home" / "attachments"
+    text = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+    converted, _, section = text.partition("<!-- confluence-to-md:attachments -->")
+
+    assert code == 0
+    assert (files / "dup (att-a).png").read_bytes() == b"a-bytes"
+    assert (files / "dup (att-m).png").read_bytes() == b"m-bytes"
+    assert "![dup](attachments/dup%20%28att-a%29.png)" in converted
+    assert "att-m" not in converted
+    assert "- [dup.png](attachments/dup%20%28att-m%29.png)" in section
+
+
 def test_export_failed_download_keeps_url_and_names_failure(
     monkeypatch, tmp_path, capsys
 ):

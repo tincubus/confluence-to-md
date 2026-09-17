@@ -364,7 +364,8 @@ class LinkRewrite:
         return href
 
     def attachment_target(self, filename: str) -> tuple[str, str]:
-        saved = self.attachments.get(filename)
+        matches = [item for item in self.attachments.values() if item.title == filename]
+        saved = min(matches, key=lambda item: item.attachment_id, default=None)
         if saved is None:
             print(
                 f"Failed to download Attachment: {self.page_id} {filename} not listed"
@@ -738,7 +739,7 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
             lines.append("")
             lines.append(f"[{title}]({source_url})")
             lines.append("")
-            by_title: dict[str, SavedAttachment] = {}
+            by_id: dict[str, SavedAttachment] = {}
             stored: list[SavedAttachment] = []
             referenced: set[str] = set()
             attachments = list_attachments(page_id)
@@ -775,7 +776,7 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
                     att_id, item["title"], local_name, absolute, downloaded
                 )
                 stored.append(saved)
-                by_title[item["title"]] = saved
+                by_id[att_id] = saved
             lines.append(
                 rewrite_storage(
                     page["body"]["storage"]["value"],
@@ -786,7 +787,7 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
                     note_paths,
                     page_ids,
                     external_links,
-                    by_title,
+                    by_id,
                     referenced,
                 )
             )
