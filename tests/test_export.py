@@ -24,17 +24,27 @@ def load_json(relative: str) -> Any:
 
 @contextmanager
 def serve_site(routes: dict[str, Any]) -> Iterator[str]:
-    """HTTP Site for JSON keyed by URL path (query ignored)."""
+    """HTTP Site keyed by URL path (query ignored)."""
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            body = routes.get(urlparse(self.path).path)
-            if body is None:
-                self.send_error(404)
+            path = urlparse(self.path).path
+            body = routes.get(path)
+            if isinstance(body, list):
+                body = body.pop(0)
+            if body is None and path.endswith("/attachments"):
+                body = {"results": [], "_links": {}}
+            if body is None or isinstance(body, int):
+                self.send_error(404 if body is None else body)
                 return
-            payload = json.dumps(body).encode("utf-8")
+            if isinstance(body, bytes):
+                payload = body
+                content_type = "application/octet-stream"
+            else:
+                payload = json.dumps(body).encode("utf-8")
+                content_type = "application/json"
             self.send_response(200)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
@@ -86,6 +96,31 @@ def make_page(
         },
         "body": {"storage": {"representation": "storage", "value": body}},
         "_links": {"webui": f"/spaces/{space_key}/pages/{page_id}/{title}"},
+    }
+
+
+def make_attachment(
+    attachment_id: str,
+    title: str,
+    *,
+    page_id: str,
+    media_type: str,
+    download_path: str,
+) -> dict[str, Any]:
+    return {
+        "id": attachment_id,
+        "status": "current",
+        "title": title,
+        "pageId": page_id,
+        "mediaType": media_type,
+        "fileSize": 4,
+        "downloadLink": download_path,
+        "version": {
+            "createdAt": "2026-09-17T04:00:00Z",
+            "number": 3,
+            "minorEdit": False,
+        },
+        "_links": {"download": download_path},
     }
 
 
@@ -1067,3 +1102,505 @@ def test_export_external_content_id_url_includes_page_id(monkeypatch, tmp_path, 
     assert f"[missing]({outside})" in body
     assert outside in captured.out
     assert "100" in captured.out
+
+
+def test_export_embeds_image_links_file_and_lists_unreferenced(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        '<ac:image ac:alt="Architecture">'
+        '<ri:attachment ri:filename="diagram.png" ri:version-at-save="1" />'
+        "</ac:image>"
+        "</p>"
+        "<p>"
+        "<ac:link>"
+        '<ri:attachment ri:filename="spec.pdf" />'
+        "</ac:link>"
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+        "/wiki/api/v2/pages/100/attachments": {
+            "results": [
+                make_attachment(
+                    "att-img",
+                    "diagram.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/diagram.png",
+                ),
+                make_attachment(
+                    "att-pdf",
+                    "spec.pdf",
+                    page_id="100",
+                    media_type="application/pdf",
+                    download_path="/download/attachments/100/spec.pdf",
+                ),
+                make_attachment(
+                    "att-sheet",
+                    "sheet.xlsx",
+                    page_id="100",
+                    media_type="application/vnd.ms-excel",
+                    download_path="/download/attachments/100/sheet.xlsx",
+                ),
+            ],
+            "_links": {},
+        },
+        "/wiki/download/attachments/100/diagram.png": b"png-bytes",
+        "/wiki/download/attachments/100/spec.pdf": b"pdf-bytes",
+        "/wiki/download/attachments/100/sheet.xlsx": b"xlsx-bytes",
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    captured = capsys.readouterr()
+    note = vault / "Engineering" / "Home" / "Home.md"
+    text = note.read_text(encoding="utf-8")
+    converted, marker, section = text.partition("<!-- confluence-to-md:attachments -->")
+    files = vault / "Engineering" / "Home" / "attachments"
+
+    assert code == 0
+    assert (files / "diagram.png").read_bytes() == b"png-bytes"
+    assert (files / "spec.pdf").read_bytes() == b"pdf-bytes"
+    assert (files / "sheet.xlsx").read_bytes() == b"xlsx-bytes"
+    assert "![Architecture](attachments/diagram.png)" in converted
+    assert "[spec.pdf](attachments/spec.pdf)" in converted
+    assert "sheet.xlsx" not in converted
+    assert marker == "<!-- confluence-to-md:attachments -->"
+    assert "- [sheet.xlsx](attachments/sheet.xlsx)" in section
+    assert "<!-- /confluence-to-md:attachments -->" in section
+    assert EMAIL not in text
+    assert TOKEN not in text
+    assert EMAIL not in captured.out + captured.err
+    assert TOKEN not in captured.out + captured.err
+
+
+def test_export_image_alt_falls_back_to_filename(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        '<ac:image><ri:attachment ri:filename="file name.png" /></ac:image>'
+        '<ac:image><ri:attachment ri:filename="shot:1.png" /></ac:image>'
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+        "/wiki/api/v2/pages/100/attachments": {
+            "results": [
+                make_attachment(
+                    "att-img",
+                    "file name.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/file%20name.png",
+                ),
+                make_attachment(
+                    "att-shot",
+                    "shot:1.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/shot.png",
+                ),
+            ],
+            "_links": {},
+        },
+        "/wiki/download/attachments/100/file%20name.png": b"png-bytes",
+        "/wiki/download/attachments/100/shot.png": b"shot-bytes",
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    text = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+
+    assert code == 0
+    assert "![file name.png](attachments/file%20name.png)" in text
+    assert "![shot:1.png](attachments/shot-1.png)" in text
+    assert "<!-- confluence-to-md:attachments -->" not in text
+    downloaded = vault / "Engineering" / "Home" / "attachments" / "file name.png"
+    assert downloaded.read_bytes() == b"png-bytes"
+
+
+def test_export_sanitizes_attachment_names_keeps_emoji_and_appends_id_on_collision(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home")],
+            "_links": {},
+        },
+        "/wiki/api/v2/pages/100/attachments": {
+            "results": [
+                make_attachment(
+                    "att-emoji",
+                    "notes 📷.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/emoji.png",
+                ),
+                make_attachment(
+                    "att-colon",
+                    "report:q1.pdf",
+                    page_id="100",
+                    media_type="application/pdf",
+                    download_path="/download/attachments/100/colon.pdf",
+                ),
+                make_attachment(
+                    "att-b",
+                    "report-q1.pdf",
+                    page_id="100",
+                    media_type="application/pdf",
+                    download_path="/download/attachments/100/dup.pdf",
+                ),
+            ],
+            "_links": {},
+        },
+        "/wiki/download/attachments/100/emoji.png": b"emoji-bytes",
+        "/wiki/download/attachments/100/colon.pdf": b"colon-bytes",
+        "/wiki/download/attachments/100/dup.pdf": b"dup-bytes",
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    files = vault / "Engineering" / "Home" / "attachments"
+    text = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+
+    assert code == 0
+    assert (files / "notes 📷.png").read_bytes() == b"emoji-bytes"
+    assert (files / "report-q1 (att-colon).pdf").read_bytes() == b"colon-bytes"
+    assert (files / "report-q1 (att-b).pdf").read_bytes() == b"dup-bytes"
+    assert "- [notes 📷.png](attachments/notes%20%F0%9F%93%B7.png)" in text
+    colon = "- [report:q1.pdf](attachments/report-q1%20%28att-colon%29.pdf)"
+    assert colon in text
+    assert "- [report-q1.pdf](attachments/report-q1%20%28att-b%29.pdf)" in text
+
+
+def test_export_failed_download_keeps_url_and_names_failure(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        '<ac:image ac:alt="Gone">'
+        '<ri:attachment ri:filename="missing.png" />'
+        "</ac:image>"
+        "</p>"
+        "<p>"
+        "<ac:image>"
+        '<ri:attachment ri:filename="notes 📷.png" />'
+        "</ac:image>"
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+        "/wiki/api/v2/pages/100/attachments": {
+            "results": [
+                make_attachment(
+                    "att-fail",
+                    "missing.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/missing.png",
+                ),
+                make_attachment(
+                    "att-emoji",
+                    "notes 📷.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/emoji.png",
+                ),
+                make_attachment(
+                    "att-orphan",
+                    "orphan.csv",
+                    page_id="100",
+                    media_type="text/csv",
+                    download_path="/download/attachments/100/orphan.csv",
+                ),
+            ],
+            "_links": {},
+        },
+        "/wiki/download/attachments/100/missing.png": 404,
+        "/wiki/download/attachments/100/emoji.png": b"emoji-bytes",
+        "/wiki/download/attachments/100/orphan.csv": 404,
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+        missing = f"{site}/wiki/download/attachments/100/missing.png"
+        orphan = f"{site}/wiki/download/attachments/100/orphan.csv"
+
+    captured = capsys.readouterr()
+    note = vault / "Engineering" / "Home" / "Home.md"
+    text = note.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert note.is_file()
+    assert f"![Gone]({missing})" in text
+    assert "![notes 📷.png](attachments/notes%20%F0%9F%93%B7.png)" in text
+    assert (vault / "Engineering" / "Home" / "attachments" / "notes 📷.png").is_file()
+    assert not (vault / "Engineering" / "Home" / "attachments" / "missing.png").exists()
+    assert f"- [orphan.csv]({orphan})" in text
+    assert (
+        "missing.png" not in text.split("<!-- confluence-to-md:attachments -->", 1)[-1]
+    )
+    assert "Failed to download Attachment: 100 att-fail Not Found" in captured.out
+    assert "Failed to download Attachment: 100 att-orphan Not Found" in captured.out
+    assert "Attachments downloaded: 1" in captured.out
+    assert EMAIL not in text
+    assert TOKEN not in text
+    assert EMAIL not in captured.out + captured.err
+    assert TOKEN not in captured.out + captured.err
+
+
+def test_export_reports_body_filename_that_is_not_listed(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        '<p><ac:image ac:alt="Ghost">'
+        '<ri:attachment ri:filename="ghost.png" /></ac:image></p>'
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+        ghost = f"{site}/wiki/download/attachments/100/ghost.png"
+
+    captured = capsys.readouterr()
+    text = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+
+    assert code == 0
+    assert f"![Ghost]({ghost})" in text
+    assert "Failed to download Attachment: 100 ghost.png not listed" in captured.out
+    assert not (vault / "Engineering" / "Home" / "attachments").exists()
+
+
+def test_export_downloads_diagram_source_and_embeds_preview(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        '<ac:structured-macro ac:name="drawio">'
+        '<ac:parameter ac:name="diagramName">flow.drawio</ac:parameter>'
+        "</ac:structured-macro>"
+        "</p>"
+        "<p>"
+        '<ac:image ac:alt="preview">'
+        '<ri:attachment ri:filename="flow-preview.png" />'
+        "</ac:image>"
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+        "/wiki/api/v2/pages/100/attachments": {
+            "results": [
+                make_attachment(
+                    "att-src",
+                    "flow.drawio",
+                    page_id="100",
+                    media_type="application/vnd.jgraph.mxfile",
+                    download_path="/download/attachments/100/flow.drawio",
+                ),
+                make_attachment(
+                    "att-prev",
+                    "flow-preview.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/flow-preview.png",
+                ),
+            ],
+            "_links": {},
+        },
+        "/wiki/download/attachments/100/flow.drawio": b"<mxfile/>",
+        "/wiki/download/attachments/100/flow-preview.png": b"preview-png",
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    text = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+    converted, _, section = text.partition("<!-- confluence-to-md:attachments -->")
+    files = vault / "Engineering" / "Home" / "attachments"
+
+    assert code == 0
+    assert (files / "flow.drawio").read_bytes() == b"<mxfile/>"
+    assert (files / "flow-preview.png").read_bytes() == b"preview-png"
+    assert "![preview](attachments/flow-preview.png)" in converted
+    assert "attachments/flow.drawio" not in converted
+    assert "- [flow.drawio](attachments/flow.drawio)" in section
+    assert "flow-preview.png" not in section
+
+
+def test_export_omits_attachments_section_when_none_or_all_referenced(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        '<p><ac:image><ri:attachment ri:filename="diagram.png" /></ac:image></p>'
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("100", "Home", body=home_body),
+                make_page("200", "Empty", parent_id="100", position=0),
+            ],
+            "_links": {},
+        },
+        "/wiki/api/v2/pages/100/attachments": {
+            "results": [
+                make_attachment(
+                    "att-img",
+                    "diagram.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/diagram.png",
+                )
+            ],
+            "_links": {},
+        },
+        "/wiki/download/attachments/100/diagram.png": b"png-bytes",
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    home = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+    empty = (vault / "Engineering" / "Home" / "Empty" / "Empty.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert code == 0
+    assert "![diagram.png](attachments/diagram.png)" in home
+    assert "<!-- confluence-to-md:attachments -->" not in home
+    assert "<!-- confluence-to-md:attachments -->" not in empty
+    assert not (vault / "Engineering" / "Home" / "Empty" / "attachments").exists()
+
+
+def test_export_retries_transient_attachment_download(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home")],
+            "_links": {},
+        },
+        "/wiki/api/v2/pages/100/attachments": {
+            "results": [
+                make_attachment(
+                    "att-img",
+                    "diagram.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/diagram.png",
+                )
+            ],
+            "_links": {},
+        },
+        "/wiki/download/attachments/100/diagram.png": [503, b"png-bytes"],
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert (
+        vault / "Engineering" / "Home" / "attachments" / "diagram.png"
+    ).read_bytes() == b"png-bytes"
+    assert "Failed to download Attachment" not in captured.out + captured.err
+    assert "Attachments downloaded: 1" in captured.out
+
+
+def test_export_downloads_attachments_from_every_page_of_results(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home")],
+            "_links": {},
+        },
+        "/wiki/api/v2/pages/100/attachments": {
+            "results": [
+                make_attachment(
+                    "att-img",
+                    "diagram.png",
+                    page_id="100",
+                    media_type="image/png",
+                    download_path="/download/attachments/100/diagram.png",
+                )
+            ],
+            "_links": {"next": "/wiki/api/v2/pages/100/attachments-next"},
+        },
+        "/wiki/api/v2/pages/100/attachments-next": {
+            "results": [
+                make_attachment(
+                    "att-sheet",
+                    "sheet.xlsx",
+                    page_id="100",
+                    media_type="application/vnd.ms-excel",
+                    download_path="/download/attachments/100/sheet.xlsx",
+                )
+            ],
+            "_links": {},
+        },
+        "/wiki/download/attachments/100/diagram.png": b"png-bytes",
+        "/wiki/download/attachments/100/sheet.xlsx": b"xlsx-bytes",
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    captured = capsys.readouterr()
+    files = vault / "Engineering" / "Home" / "attachments"
+
+    assert code == 0
+    assert (files / "diagram.png").read_bytes() == b"png-bytes"
+    assert (files / "sheet.xlsx").read_bytes() == b"xlsx-bytes"
+    assert "Attachments downloaded: 2" in captured.out

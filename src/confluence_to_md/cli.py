@@ -164,6 +164,45 @@ def folder_name(title: str, suffix: str, used: set[str]) -> str:
     return name
 
 
+def sanitize_attachment_name(title: str, attachment_id: str) -> str:
+    name = title.strip()
+    for char in '\\/:*?"<>|':
+        name = name.replace(char, "-")
+    return name or attachment_id
+
+
+def append_attachment_id(name: str, attachment_id: str) -> str:
+    stem, dot, ext = name.rpartition(".")
+    if stem and dot:
+        return f"{stem} ({attachment_id}).{ext}"
+    return f"{name} ({attachment_id})"
+
+
+def attachment_disk_names(items: list[dict]) -> dict[str, str]:
+    sanitized = [
+        (str(item["id"]), sanitize_attachment_name(item["title"], str(item["id"])))
+        for item in items
+    ]
+    counts: dict[str, int] = {}
+    for _, name in sanitized:
+        counts[name.lower()] = counts.get(name.lower(), 0) + 1
+    used: set[str] = set()
+    names: dict[str, str] = {}
+    for attachment_id, name in sanitized:
+        local = name
+        if counts[name.lower()] > 1 or local.lower() in used:
+            local = append_attachment_id(name, attachment_id)
+        while local.lower() in used:
+            local = append_attachment_id(local, attachment_id)
+        used.add(local.lower())
+        names[attachment_id] = local
+    return names
+
+
+def local_attachment_href(local_name: str) -> str:
+    return "attachments/" + quote(local_name, safe="")
+
+
 def sibling_sort_key(page: dict) -> tuple:
     position = page.get("position")
     if position is None:
@@ -237,6 +276,16 @@ def page_path_parts(
     return parts
 
 
+def attachment_url(site: str, download_link: str) -> str:
+    if download_link.startswith(("http://", "https://")):
+        return download_link
+    if download_link.startswith("/wiki/"):
+        return site + download_link
+    if download_link.startswith("/"):
+        return f"{site}/wiki{download_link}"
+    return f"{site}/wiki/{download_link}"
+
+
 def relative_note_href(
     from_dir: Path, to_file: Path, fragment: str | None = None
 ) -> str:
@@ -258,6 +307,22 @@ def link_label(elem: ET.Element, fallback: str) -> str:
     return fallback
 
 
+class SavedAttachment:
+    def __init__(
+        self,
+        attachment_id: str,
+        title: str,
+        local_name: str,
+        absolute_url: str,
+        downloaded: bool,
+    ) -> None:
+        self.attachment_id = attachment_id
+        self.title = title
+        self.local_name = local_name
+        self.absolute_url = absolute_url
+        self.downloaded = downloaded
+
+
 class LinkRewrite:
     def __init__(
         self,
@@ -268,6 +333,8 @@ class LinkRewrite:
         note_paths: dict[str, Path],
         page_ids: dict[tuple[str, str], str],
         external_links: list[tuple[str, str]],
+        attachments: dict[str, SavedAttachment],
+        referenced: set[str],
     ) -> None:
         self.site = site
         self.space_key = space_key
@@ -276,6 +343,8 @@ class LinkRewrite:
         self.note_paths = note_paths
         self.page_ids = page_ids
         self.external_links = external_links
+        self.attachments = attachments
+        self.referenced = referenced
 
     def page_href(
         self, space_key: str, title: str, page_id: str | None, fragment: str | None
@@ -294,6 +363,21 @@ class LinkRewrite:
         self.external_links.append((self.page_id, href))
         return href
 
+    def attachment_target(self, filename: str) -> tuple[str, str]:
+        saved = self.attachments.get(filename)
+        if saved is None:
+            print(
+                f"Failed to download Attachment: {self.page_id} {filename} not listed"
+            )
+            return (
+                f"{self.site}/wiki/download/attachments/{self.page_id}/"
+                f"{quote(filename, safe='')}"
+            ), filename
+        self.referenced.add(saved.attachment_id)
+        if saved.downloaded:
+            return local_attachment_href(saved.local_name), filename
+        return saved.absolute_url, filename
+
     def title_of(self, page_id: str, fallback: str) -> str:
         for (_, title), pid in self.page_ids.items():
             if pid == page_id:
@@ -304,6 +388,20 @@ class LinkRewrite:
         if page_id and page_id in self.note_paths:
             return self.note_paths[page_id].stem
         return fallback
+
+
+def convert_attachment(elem: ET.Element, ctx: LinkRewrite) -> str | None:
+    attachment = find_local(elem, "attachment")
+    if attachment is None:
+        return None
+    name = local_name(elem.tag)
+    if name not in {"image", "link"}:
+        return None
+    filename = get_attr(attachment, "filename") or ""
+    href, label = ctx.attachment_target(filename)
+    if name == "image":
+        return f"![{get_attr(elem, 'alt') or label}]({href})"
+    return f"[{link_label(elem, label)}]({href})"
 
 
 def convert_mention(elem: ET.Element) -> str | None:
@@ -434,6 +532,8 @@ def render_children(elem: ET.Element, ctx: LinkRewrite) -> str:
 def render_node(elem: ET.Element, ctx: LinkRewrite) -> str:
     converted = convert_mention(elem)
     if converted is None:
+        converted = convert_attachment(elem, ctx)
+    if converted is None:
         converted = convert_page_link(elem, ctx)
     if converted is None:
         converted = convert_macro(elem, ctx)
@@ -466,6 +566,8 @@ def rewrite_storage(
     note_paths: dict[str, Path],
     page_ids: dict[tuple[str, str], str],
     external_links: list[tuple[str, str]],
+    attachments: dict[str, SavedAttachment],
+    referenced: set[str],
 ) -> str:
     try:
         root = ET.fromstring(
@@ -476,7 +578,15 @@ def rewrite_storage(
     return render_children(
         root,
         LinkRewrite(
-            site, space_key, page_id, note_dir, note_paths, page_ids, external_links
+            site,
+            space_key,
+            page_id,
+            note_dir,
+            note_paths,
+            page_ids,
+            external_links,
+            attachments,
+            referenced,
         ),
     )
 
@@ -501,12 +611,55 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
         with urllib.request.urlopen(request, timeout=60) as response:
             return json.load(response)
 
+    def read_bytes(url: str) -> bytes:
+        last: urllib.error.URLError | None = None
+        for _ in range(3):
+            try:
+                request = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    return response.read()
+            except urllib.error.HTTPError as err:
+                err.close()
+                if err.code not in {429, 500, 502, 503, 504}:
+                    raise
+                last = err
+            except urllib.error.URLError as err:
+                last = err
+        assert last is not None
+        raise last
+
+    def failure_reason(err: urllib.error.URLError) -> str:
+        reason = err.reason
+        return reason if isinstance(reason, str) else str(reason)
+
+    def list_attachments(page_id: str) -> list[dict]:
+        url: str | None = (
+            f"{site}/wiki/api/v2/pages/{quote(page_id, safe='')}/attachments?limit=250"
+        )
+        found: list[dict] = []
+        try:
+            while url:
+                data = json.loads(read_bytes(url))
+                found.extend(
+                    item
+                    for item in data.get("results", [])
+                    if item.get("status", "current") == "current"
+                )
+                next_link = data.get("_links", {}).get("next")
+                url = urljoin(site + "/", next_link) if next_link else None
+        except urllib.error.URLError as err:
+            print(
+                f"Failed to download Attachment: {page_id} {failure_reason(err)}",
+            )
+        return found
+
     vault_root = Path(vault)
     used_space_folders: set[str] = set()
     external_links: list[tuple[str, str]] = []
     note_paths: dict[str, Path] = {}
     page_ids: dict[tuple[str, str], str] = {}
     prepared: list[tuple] = []
+    downloaded_count = 0
     for space_key in space_keys:
         try:
             spaces = fetch_json(
@@ -585,6 +738,44 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
             lines.append("")
             lines.append(f"[{title}]({source_url})")
             lines.append("")
+            by_title: dict[str, SavedAttachment] = {}
+            stored: list[SavedAttachment] = []
+            referenced: set[str] = set()
+            attachments = list_attachments(page_id)
+            disk_names = attachment_disk_names(attachments)
+            for item in attachments:
+                att_id = str(item["id"])
+                local_name = disk_names[att_id]
+                download_link = item.get("downloadLink") or item.get("_links", {}).get(
+                    "download", ""
+                )
+                absolute = (
+                    attachment_url(site, download_link)
+                    if download_link
+                    else (
+                        f"{site}/wiki/download/attachments/{page_id}/"
+                        f"{quote(item['title'], safe='')}"
+                    )
+                )
+                downloaded = False
+                try:
+                    payload = read_bytes(absolute)
+                except urllib.error.URLError as err:
+                    print(
+                        "Failed to download Attachment: "
+                        f"{page_id} {att_id} {failure_reason(err)}"
+                    )
+                else:
+                    attachments_dir = folder / "attachments"
+                    attachments_dir.mkdir(exist_ok=True)
+                    (attachments_dir / local_name).write_bytes(payload)
+                    downloaded = True
+                    downloaded_count += 1
+                saved = SavedAttachment(
+                    att_id, item["title"], local_name, absolute, downloaded
+                )
+                stored.append(saved)
+                by_title[item["title"]] = saved
             lines.append(
                 rewrite_storage(
                     page["body"]["storage"]["value"],
@@ -595,6 +786,8 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
                     note_paths,
                     page_ids,
                     external_links,
+                    by_title,
+                    referenced,
                 )
             )
             lines.append("")
@@ -610,11 +803,27 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
                     lines.append(f"- [{child_name}]({rel})")
                 lines.append("<!-- /confluence-to-md:children -->")
                 lines.append("")
+            unreferenced = [
+                item for item in stored if item.attachment_id not in referenced
+            ]
+            if unreferenced:
+                lines.append("<!-- confluence-to-md:attachments -->")
+                lines.append("## Attachments")
+                for item in unreferenced:
+                    href = (
+                        local_attachment_href(item.local_name)
+                        if item.downloaded
+                        else item.absolute_url
+                    )
+                    lines.append(f"- [{item.title}]({href})")
+                lines.append("<!-- /confluence-to-md:attachments -->")
+                lines.append("")
             (folder / f"{folder_names[page_id]}.md").write_text(
                 "\n".join(lines), encoding="utf-8"
             )
     for page_id, url in external_links:
         print(f"External link on the Site: {page_id} {url}")
+    print(f"Attachments downloaded: {downloaded_count}")
     return 0
 
 
