@@ -1,0 +1,40 @@
+{
+  "results": [
+    {
+      "id": "111",
+      "key": "ENG",
+      "name": "Engineering",
+      "type": "global",
+      "status": "current"
+    },
+    {
+      "id": "555",
+      "key": "COLAB",
+      "name": "Collab Space",
+      "type": "collaboration",
+      "status": "current"
+    },
+    {
+      "id": "666",
+      "key": "KB",
+      "name": "Knowledge Base",
+      "type": "knowledge_base",
+      "status": "current"
+    },
+    {
+      "id": "777",
+      "key": "~ops",
+      "name": "Ops",
+      "type": "global",
+      "status": "current"
+    },
+    {
+      "id": "888",
+      "key": "BOB",
+      "name": "Bob",
+      "type": "personal",
+      "status": "current"
+    }
+  ],
+  "_links": {}
+}

@@ -1,0 +1,19 @@
+{
+  "results": [
+    {
+      "id": "333",
+      "key": "~alice",
+      "name": "Alice",
+      "type": "personal",
+      "status": "current"
+    },
+    {
+      "id": "888",
+      "key": "BOB",
+      "name": "Bob",
+      "type": "personal",
+      "status": "current"
+    }
+  ],
+  "_links": {}
+}

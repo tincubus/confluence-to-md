@@ -84,7 +84,7 @@ def test_list_prints_one_non_archived_space_per_line(monkeypatch, capsys):
     assert captured.out == "ENG Engineering\n"
 
 
-def test_list_omits_archived_and_includes_personal_space(monkeypatch, capsys):
+def test_list_omits_archived_and_personal_spaces(monkeypatch, capsys):
     monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
     monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
     with serve_spaces({None: load_json("mixed-spaces/spaces.json")}) as site:
@@ -92,7 +92,33 @@ def test_list_omits_archived_and_includes_personal_space(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert code == 0
-    assert captured.out == "ENG Engineering\n~alice Alice\n"
+    assert captured.out == "ENG Engineering\n"
+
+
+def test_list_keeps_non_personal_types_and_identifies_personal_by_type(
+    monkeypatch, capsys
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    with serve_spaces({None: load_json("space-types/spaces.json")}) as site:
+        code = main(["list", site])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == (
+        "ENG Engineering\nCOLAB Collab Space\nKB Knowledge Base\n~ops Ops\n"
+    )
+
+
+def test_list_prints_nothing_when_every_space_is_personal(monkeypatch, capsys):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    with serve_spaces({None: load_json("only-personal/spaces.json")}) as site:
+        code = main(["list", site])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
 
 
 def test_list_follows_every_page_of_space_results(monkeypatch, capsys):
@@ -107,7 +133,7 @@ def test_list_follows_every_page_of_space_results(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert code == 0
-    assert captured.out == "ENG Engineering\n~alice Alice\nTEAM Team Space\n"
+    assert captured.out == "ENG Engineering\nTEAM Team Space\n"
 
 
 def test_list_does_not_print_token_or_email(monkeypatch, capsys):

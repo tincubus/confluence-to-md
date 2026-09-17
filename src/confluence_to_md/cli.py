@@ -25,7 +25,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Print Spaces the token can Export",
         description=(
             "Print non-archived Spaces the token can see, one per line, "
-            "Space key then name. No prompt."
+            "Space key then name. Archived Spaces and Personal Spaces are omitted. "
+            "No prompt."
         ),
     )
     list_parser.add_argument(
@@ -66,6 +67,8 @@ def list_spaces(site: str) -> int:
                 data = json.load(response)
             for space in data["results"]:
                 if space.get("status") == "archived":
+                    continue
+                if space.get("type") == "personal":
                     continue
                 print(f"{space['key']} {space['name']}")
             next_link = data.get("_links", {}).get("next")
