@@ -84,6 +84,19 @@ def test_list_prints_one_non_archived_space_per_line(monkeypatch, capsys):
     assert captured.out == "ENG Engineering\n"
 
 
+def test_list_prints_space_names_with_emoji(monkeypatch, capsys):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    spaces = load_json("one-space/spaces.json")
+    spaces["results"][0]["name"] = "🔬 Engineering"
+    with serve_spaces({None: spaces}) as site:
+        code = main(["list", site])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == "ENG 🔬 Engineering\n"
+
+
 def test_list_omits_archived_and_personal_spaces(monkeypatch, capsys):
     monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
     monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)

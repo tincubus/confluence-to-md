@@ -112,12 +112,52 @@ def list_spaces(site: str) -> int:
     return 0
 
 
-def folder_name(title: str, page_id: str, used: set[str]) -> str:
-    name = title.strip()
+# Emoji and pictographs, including ZWJ sequences and emoji presentation variants.
+_PICTOGRAPH = (
+    "["
+    "\u00a9\u00ae"
+    "\u203c\u2049"
+    "\u2122\u2139"
+    "\u2194-\u2199"
+    "\u21a9-\u21aa"
+    "\u231a-\u231b"
+    "\u2328\u23cf"
+    "\u23e9-\u23f3"
+    "\u23f8-\u23fa"
+    "\u24c2"
+    "\u25aa-\u25ab\u25b6\u25c0"
+    "\u25fb-\u25fe"
+    "\u2600-\u27bf"
+    "\u2934-\u2935"
+    "\u2b05-\u2b07"
+    "\u2b1b-\u2b1c"
+    "\u2b50\u2b55"
+    "\u3030\u303d"
+    "\u3297\u3299"
+    "\U0001f000-\U0001faff"
+    "]"
+)
+EMOJI = re.compile(
+    "(?:"
+    "[#*0-9]\ufe0f?\u20e3"
+    "|"
+    "\U0001f3f4[\U000e0020-\U000e007e]+\U000e007f"
+    "|"
+    + _PICTOGRAPH
+    + "(?:\ufe0e|\ufe0f)?"
+    + "(?:\u200d"
+    + _PICTOGRAPH
+    + "(?:\ufe0e|\ufe0f)?)*"
+    ")"
+)
+
+
+def folder_name(title: str, suffix: str, used: set[str]) -> str:
+    name = re.sub(r"\s+", " ", EMOJI.sub("", title)).strip()
     for char in '\\/:*?"<>|':
         name = name.replace(char, "-")
     if not name or name.lower() in used:
-        name = f"{name} ({page_id})"
+        name = f"{name} ({suffix})"
     used.add(name.lower())
     return name
 
@@ -460,6 +500,7 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
             return json.load(response)
 
     vault_root = Path(vault)
+    used_space_folders: set[str] = set()
     external_links: list[tuple[str, str]] = []
     note_paths: dict[str, Path] = {}
     page_ids: dict[tuple[str, str], str] = {}
@@ -487,7 +528,9 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
             print(f"Could not Export the Selection: {err.reason}", file=sys.stderr)
             return 1
 
-        space_folder = vault_root / space["name"]
+        space_folder = vault_root / folder_name(
+            space["name"], space_key, used_space_folders
+        )
         space_folder.mkdir(parents=True, exist_ok=True)
         pages_by_id = {str(page["id"]): page for page in pages["results"]}
         children_of: dict[str, list[dict]] = {}

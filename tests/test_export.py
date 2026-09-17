@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from confluence_to_md.cli import main
 
@@ -182,6 +182,321 @@ def test_export_sanitizes_slash_in_page_title(monkeypatch, tmp_path):
         encoding="utf-8"
     )
     assert not (vault / "Engineering" / "Competitor Research (ข้อมูลคู่แข่ง").exists()
+
+
+def test_export_drops_emoji_from_page_folder_and_note_name(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    title = "🔬 Competitor Research (ข้อมูลคู่แข่ง/Market)"
+    routes = one_page_routes()
+    page = routes["/wiki/api/v2/spaces/111/pages"]["results"][0]
+    page["title"] = title
+    page["_links"]["webui"] = f"/spaces/ENG/pages/123456/{title}"
+    page["body"]["storage"]["value"] = "<p>See the 👋 notes</p>"
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+        source_url = f"{site}/wiki/spaces/ENG/pages/123456/{title}"
+
+    name = "Competitor Research (ข้อมูลคู่แข่ง-Market)"
+    note = vault / "Engineering" / name / f"{name}.md"
+    text = note.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert note.is_file()
+    assert not (vault / "Engineering" / title).exists()
+    assert f'title: "{title}"' in text
+    assert f"[{title}]({source_url})" in text
+    assert "👋" in text
+
+
+def test_export_drops_zwj_and_presentation_emoji_from_folder_names(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("200", "👨‍👩‍👧 Plans"),
+                make_page("300", "❤️ Status"),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    plans = vault / "Engineering" / "Plans" / "Plans.md"
+    status = vault / "Engineering" / "Status" / "Status.md"
+
+    assert code == 0
+    assert plans.is_file()
+    assert status.is_file()
+    assert 'title: "👨‍👩‍👧 Plans"' in plans.read_text(encoding="utf-8")
+    assert 'title: "❤️ Status"' in status.read_text(encoding="utf-8")
+    assert not (vault / "Engineering" / "👨‍👩‍👧 Plans").exists()
+    assert not (vault / "Engineering" / "❤️ Status").exists()
+
+
+def test_export_collapses_whitespace_in_folder_names(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = one_page_routes()
+    page = routes["/wiki/api/v2/spaces/111/pages"]["results"][0]
+    page["title"] = "🔬  Foo   Bar  "
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    note = vault / "Engineering" / "Foo Bar" / "Foo Bar.md"
+    text = note.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert note.is_file()
+    assert 'title: "🔬  Foo   Bar  "' in text
+
+
+def test_export_drops_emoji_from_space_folder_name(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = one_page_routes()
+    routes["/wiki/api/v2/spaces"]["results"][0]["name"] = "🔬 Team / Ops"
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    note = vault / "Team - Ops" / "Home" / "Home.md"
+
+    assert code == 0
+    assert note.is_file()
+    assert not (vault / "🔬 Team / Ops").exists()
+    assert not (vault / "🔬 Team").exists()
+
+
+def test_export_page_link_and_child_pages_use_sanitized_emoji_names(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>See "
+        "<ac:link>"
+        '<ri:page ri:content-title="🔬 Run book" ri:space-key="ENG" />'
+        "<ac:plain-text-link-body><![CDATA[the runbook]]></ac:plain-text-link-body>"
+        "</ac:link>"
+        ".</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("100", "Home", body=home_body),
+                make_page("200", "🔬 Run book", parent_id="100", position=0),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    home_dir = vault / "Engineering" / "Home"
+    home = (home_dir / "Home.md").read_text(encoding="utf-8")
+    href = "Run%20book/Run%20book.md"
+    link = f"[Run book]({href})"
+
+    assert code == 0
+    assert link in home
+    assert "http" not in link
+    assert (
+        "<!-- confluence-to-md:children -->\n"
+        "## Child pages\n"
+        f"- {link}\n"
+        "<!-- /confluence-to-md:children -->"
+    ) in home
+    assert (home_dir / unquote(href)).is_file()
+
+
+def test_export_keeps_emoji_in_note_body(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = one_page_routes()
+    page = routes["/wiki/api/v2/spaces/111/pages"]["results"][0]
+    page["body"]["storage"]["value"] = "<p>See 👋</p>"
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    text = (vault / "Engineering" / "Home" / "Home.md").read_text(encoding="utf-8")
+
+    assert code == 0
+    assert "See 👋" in text
+
+
+def test_export_appends_page_id_when_emoji_title_sanitizes_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = one_page_routes()
+    page = routes["/wiki/api/v2/spaces/111/pages"]["results"][0]
+    page["title"] = "🔬"
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    note = vault / "Engineering" / " (123456)" / " (123456).md"
+    text = note.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert note.is_file()
+    assert 'title: "🔬"' in text
+    assert not (vault / "Engineering" / "🔬").exists()
+
+
+def test_export_appends_page_id_when_sanitized_names_collide(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("1", "Home"),
+                make_page("10", "Notes", parent_id="1", position=0),
+                make_page("11", "🔬 Notes", parent_id="1", position=1),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    first = vault / "Engineering" / "Home" / "Notes" / "Notes.md"
+    second = vault / "Engineering" / "Home" / "Notes (11)" / "Notes (11).md"
+
+    assert code == 0
+    assert first.is_file()
+    assert second.is_file()
+    assert 'title: "🔬 Notes"' in second.read_text(encoding="utf-8")
+
+
+def test_export_appends_space_key_when_space_name_sanitizes_empty_or_collides(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": {
+            "results": [
+                {
+                    "id": "111",
+                    "key": "ENG",
+                    "name": "🔬",
+                    "type": "global",
+                    "status": "current",
+                },
+                {
+                    "id": "222",
+                    "key": "TEAM",
+                    "name": "🔬 Team",
+                    "type": "global",
+                    "status": "current",
+                },
+                {
+                    "id": "333",
+                    "key": "OPS",
+                    "name": "Team",
+                    "type": "global",
+                    "status": "current",
+                },
+            ],
+            "_links": {},
+        },
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("1", "Home")],
+            "_links": {},
+        },
+        "/wiki/api/v2/spaces/222/pages": {
+            "results": [make_page("2", "Home", space_key="TEAM", space_id="222")],
+            "_links": {},
+        },
+        "/wiki/api/v2/spaces/333/pages": {
+            "results": [make_page("3", "Home", space_key="OPS", space_id="333")],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG", "TEAM", "OPS"])
+
+    assert code == 0
+    assert (vault / " (ENG)" / "Home" / "Home.md").is_file()
+    assert (vault / "Team" / "Home" / "Home.md").is_file()
+    assert (vault / "Team (OPS)" / "Home" / "Home.md").is_file()
+    assert not (vault / "🔬").exists()
+    assert not (vault / "🔬 Team").exists()
+
+
+def test_export_drops_pictograph_emoji_outside_the_main_blocks(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = one_page_routes()
+    page = routes["/wiki/api/v2/spaces/111/pages"]["results"][0]
+    page["title"] = "⏰ ⭐ Status"
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    note = vault / "Engineering" / "Status" / "Status.md"
+    text = note.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert note.is_file()
+    assert 'title: "⏰ ⭐ Status"' in text
+
+
+def test_export_drops_keycap_emoji_and_pictographic_marks(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [
+                make_page("200", "1️⃣ Page"),
+                make_page("300", "*️⃣"),
+                make_page("400", "©️ Legal"),
+            ],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+
+    page = vault / "Engineering" / "Page" / "Page.md"
+    empty = vault / "Engineering" / " (300)" / " (300).md"
+    legal = vault / "Engineering" / "Legal" / "Legal.md"
+
+    assert code == 0
+    assert page.is_file()
+    assert empty.is_file()
+    assert legal.is_file()
+    assert 'title: "1️⃣ Page"' in page.read_text(encoding="utf-8")
+    assert 'title: "©️ Legal"' in legal.read_text(encoding="utf-8")
+    assert not (vault / "Engineering" / "1 Page").exists()
 
 
 def test_export_nests_homepage_children_and_grandchild(monkeypatch, tmp_path):
