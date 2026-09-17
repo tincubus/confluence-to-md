@@ -747,8 +747,9 @@ def test_export_keeps_out_of_selection_and_non_page_urls(monkeypatch, tmp_path):
 
     assert code == 0
     assert f"[missing]({outside})" in body
-    assert '<a href="https://example.com/docs">docs</a>' in body
-    assert '<a href="mailto:ops@example.com">mail</a>' in body
+    assert "[docs](https://example.com/docs)" in body
+    assert "[mail](mailto:ops@example.com)" in body
+    assert "<a href=" not in body
     assert list(vault.rglob("*.md")) == [vault / "Engineering" / "Home" / "Home.md"]
 
 
@@ -1658,3 +1659,230 @@ def test_export_downloads_attachments_from_every_page_of_results(
     assert (files / "diagram.png").read_bytes() == b"png-bytes"
     assert (files / "sheet.xlsx").read_bytes() == b"xlsx-bytes"
     assert "Attachments downloaded: 2" in captured.out
+
+
+def export_home_note(monkeypatch, tmp_path, body: str, title: str = "Home"):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", title, body=body)],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+    note = vault / "Engineering" / title / f"{title}.md"
+    text = note.read_text(encoding="utf-8") if note.is_file() else ""
+    note_body = text.split("---", 2)[2] if text.count("---") >= 2 else text
+    return code, note, note_body
+
+
+def test_export_code_macro_becomes_fenced_block(monkeypatch, tmp_path):
+    body = (
+        '<ac:structured-macro ac:name="code">'
+        '<ac:parameter ac:name="language">python</ac:parameter>'
+        "<ac:plain-text-body><![CDATA[print(1)]]></ac:plain-text-body>"
+        "</ac:structured-macro>"
+    )
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "```python\nprint(1)\n```" in note_body
+    assert "ac:structured-macro" not in note_body
+
+
+def test_export_task_list_becomes_checkboxes(monkeypatch, tmp_path):
+    body = (
+        "<ac:task-list>"
+        "<ac:task>"
+        "<ac:task-status>incomplete</ac:task-status>"
+        "<ac:task-body>Open item</ac:task-body>"
+        "</ac:task>"
+        "<ac:task>"
+        "<ac:task-status>complete</ac:task-status>"
+        "<ac:task-body>Done item</ac:task-body>"
+        "</ac:task>"
+        "</ac:task-list>"
+    )
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "- [ ] Open item" in note_body
+    assert "- [x] Done item" in note_body
+    assert "ac:task" not in note_body
+
+
+def test_export_panels_become_obsidian_callouts(monkeypatch, tmp_path):
+    body = (
+        '<ac:structured-macro ac:name="info">'
+        "<ac:rich-text-body><p>Info body</p></ac:rich-text-body>"
+        "</ac:structured-macro>"
+        '<ac:structured-macro ac:name="note">'
+        "<ac:rich-text-body><p>Note body</p></ac:rich-text-body>"
+        "</ac:structured-macro>"
+        '<ac:structured-macro ac:name="warning">'
+        "<ac:rich-text-body><p>Warning body</p></ac:rich-text-body>"
+        "</ac:structured-macro>"
+        '<ac:structured-macro ac:name="tip">'
+        "<ac:rich-text-body><p>Tip body</p></ac:rich-text-body>"
+        "</ac:structured-macro>"
+        '<ac:structured-macro ac:name="success">'
+        "<ac:rich-text-body><p>Success body</p></ac:rich-text-body>"
+        "</ac:structured-macro>"
+    )
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "> [!info]\n> Info body" in note_body
+    assert "> [!note]\n> Note body" in note_body
+    assert "> [!warning]\n> Warning body" in note_body
+    assert "> [!tip]\n> Tip body" in note_body
+    assert "> [!success]\n> Success body" in note_body
+    assert "ac:structured-macro" not in note_body
+
+
+def test_export_simple_table_becomes_gfm(monkeypatch, tmp_path):
+    body = (
+        "<table><tbody>"
+        "<tr><th>Name</th><th>Role</th></tr>"
+        "<tr><td>Ada</td><td>Engineer</td></tr>"
+        "</tbody></table>"
+    )
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "| Name | Role |" in note_body
+    assert "| --- | --- |" in note_body
+    assert "| Ada | Engineer |" in note_body
+    assert "<table>" not in note_body
+
+
+def test_export_complex_table_stays_html(monkeypatch, tmp_path):
+    body = (
+        "<table><tbody>"
+        '<tr><th colspan="2">Team</th></tr>'
+        "<tr><td>Ada</td><td>Engineer</td></tr>"
+        "</tbody></table>"
+    )
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert '<th colspan="2">Team</th>' in note_body
+    assert "<td>Ada</td>" in note_body
+    assert "<td>Engineer</td>" in note_body
+    assert "| --- |" not in note_body
+
+
+def test_export_table_with_list_stays_html(monkeypatch, tmp_path):
+    body = (
+        "<table><tbody>"
+        "<tr><th>Name</th><th>Skills</th></tr>"
+        "<tr><td>Ada</td><td><ul><li>Math</li></ul></td></tr>"
+        "</tbody></table>"
+    )
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "<table>" in note_body
+    assert "<td>Ada</td>" in note_body
+    assert "- Math" in note_body
+    assert "| --- |" not in note_body
+
+
+def test_export_plain_text_macro_becomes_text(monkeypatch, tmp_path):
+    body = (
+        '<ac:structured-macro ac:name="noformat">'
+        "<ac:plain-text-body><![CDATA[raw output]]></ac:plain-text-body>"
+        "</ac:structured-macro>"
+    )
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "raw output" in note_body
+    assert "ac:structured-macro" not in note_body
+    assert "```" not in note_body
+
+
+def test_export_unsupported_macro_becomes_placeholder_note(monkeypatch, tmp_path):
+    body = '<ac:structured-macro ac:name="toc"></ac:structured-macro>'
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "Placeholder: toc" in note_body
+    assert "ac:structured-macro" not in note_body
+
+
+def test_export_omits_first_heading_equal_to_page_title(monkeypatch, tmp_path):
+    body = "<h1>Home</h1><h2>Setup</h2><p>Welcome</p>"
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "# Home" not in note_body
+    assert "<h1>" not in note_body
+    assert "## Setup" in note_body
+    assert "Welcome" in note_body
+
+
+def test_export_lists_emphasis_and_inline_code_become_markdown(monkeypatch, tmp_path):
+    body = (
+        "<p><span><strong>Bold</strong></span> <em>italic</em> <code>x</code></p>"
+        "<ul><li>Alpha</li><li>Beta</li></ul>"
+        "<ol><li>One</li><li>Two</li></ol>"
+    )
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "**Bold**" in note_body
+    assert "*italic*" in note_body
+    assert "`x`" in note_body
+    assert "- Alpha" in note_body
+    assert "- Beta" in note_body
+    assert "1. One" in note_body
+    assert "2. Two" in note_body
+    assert "<ul>" not in note_body
+    assert "<strong>" not in note_body
+    assert "<span>" not in note_body
+
+
+def test_export_nests_child_list_items(monkeypatch, tmp_path):
+    body = "<ul><li>Alpha<ul><li>Nested</li></ul></li></ul>"
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "- Alpha\n  - Nested" in note_body
+
+
+def test_export_unknown_element_becomes_placeholder(monkeypatch, tmp_path):
+    body = '<ac:emoticon ac:name="smile" />'
+
+    code, note, note_body = export_home_note(monkeypatch, tmp_path, body)
+
+    assert code == 0
+    assert note.is_file()
+    assert "Placeholder: emoticon" in note_body
+    assert "ac:emoticon" not in note_body

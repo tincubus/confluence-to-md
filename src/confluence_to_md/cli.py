@@ -442,6 +442,20 @@ def convert_page_link(elem: ET.Element, ctx: LinkRewrite) -> str | None:
 
 PAGE_MACROS = {"include", "excerpt-include"}
 SMART_MACROS = {"smart-link", "applink-smartlink", "card"}
+CALLOUTS = {"info", "note", "warning", "tip", "success"}
+TABLE_BLOCK_CELLS = {
+    "table",
+    "ul",
+    "ol",
+    "pre",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "task-list",
+}
 
 
 def parse_page_href(href: str, site: str) -> tuple[str, str, str, str | None] | None:
@@ -486,7 +500,10 @@ def convert_anchor(elem: ET.Element, ctx: LinkRewrite) -> str | None:
     if not href:
         return None
     label = "".join(elem.itertext()) or href
-    return convert_href(ctx, href, label)
+    converted = convert_href(ctx, href, label)
+    if converted is not None:
+        return converted
+    return f"[{label}]({href})"
 
 
 def macro_param(elem: ET.Element, name: str) -> str | None:
@@ -497,10 +514,43 @@ def macro_param(elem: ET.Element, name: str) -> str | None:
     return None
 
 
+def macro_plain_text(elem: ET.Element) -> str | None:
+    for child in elem:
+        if local_name(child.tag) == "plain-text-body":
+            return "".join(child.itertext())
+    return None
+
+
+def fenced_block(code: str, language: str | None) -> str:
+    ticks = "```"
+    while ticks in code:
+        ticks += "`"
+    lang = language or ""
+    body = code.strip("\n")
+    return f"{ticks}{lang}\n{body}\n{ticks}\n\n"
+
+
+def as_callout(kind: str, inner: str) -> str:
+    lines = inner.strip().splitlines() or [""]
+    quoted = [f"> [!{kind}]"]
+    quoted.extend(f"> {line}" if line else ">" for line in lines)
+    return "\n".join(quoted) + "\n\n"
+
+
 def convert_macro(elem: ET.Element, ctx: LinkRewrite) -> str | None:
     if local_name(elem.tag) != "structured-macro":
         return None
     name = get_attr(elem, "name")
+    if name == "code":
+        language = macro_param(elem, "language")
+        return fenced_block(macro_plain_text(elem) or "", language)
+    if name in CALLOUTS:
+        inner = ""
+        for child in elem:
+            if local_name(child.tag) == "rich-text-body":
+                inner = render_children(child, ctx)
+                break
+        return as_callout(name, inner)
     if name in PAGE_MACROS:
         page = find_local(elem, "page")
         if page is None:
@@ -520,7 +570,131 @@ def convert_macro(elem: ET.Element, ctx: LinkRewrite) -> str | None:
         if converted is not None:
             return converted
         return f"[{url}]({url})"
+    text = macro_plain_text(elem)
+    if text is not None:
+        return text
+    return f"Placeholder: {name}"
+
+
+def convert_task_list(elem: ET.Element, ctx: LinkRewrite) -> str | None:
+    if local_name(elem.tag) != "task-list":
+        return None
+    items: list[str] = []
+    for task in elem:
+        if local_name(task.tag) != "task":
+            continue
+        status = ""
+        body = ""
+        for child in task:
+            name = local_name(child.tag)
+            if name == "task-status":
+                status = "".join(child.itertext()).strip()
+            elif name == "task-body":
+                body = render_children(child, ctx).strip()
+        mark = "x" if status == "complete" else " "
+        items.append(f"- [{mark}] {body}".rstrip())
+    return "\n".join(items) + "\n\n"
+
+
+def convert_list(elem: ET.Element, ctx: LinkRewrite, ordered: bool) -> str:
+    items: list[str] = []
+    index = 1
+    for child in elem:
+        if local_name(child.tag) != "li":
+            continue
+        inner = render_children(child, ctx).strip()
+        prefix = f"{index}. " if ordered else "- "
+        lines = inner.splitlines() or [""]
+        item = prefix + lines[0]
+        item += "".join(f"\n  {line}" if line else "\n" for line in lines[1:])
+        items.append(item)
+        index += 1
+    return "\n".join(items) + "\n\n"
+
+
+def convert_html(elem: ET.Element, ctx: LinkRewrite) -> str | None:
+    name = local_name(elem.tag)
+    if name == "p":
+        return render_children(elem, ctx).strip() + "\n\n"
+    if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        level = int(name[1])
+        text = render_children(elem, ctx).strip()
+        return f"{'#' * level} {text}\n\n"
+    if name in {"strong", "b"}:
+        return f"**{render_children(elem, ctx).strip()}**"
+    if name in {"em", "i"}:
+        return f"*{render_children(elem, ctx).strip()}*"
+    if name == "code":
+        return f"`{''.join(elem.itertext())}`"
+    if name in {"ul", "ol"}:
+        return "\n" + convert_list(elem, ctx, ordered=name == "ol")
+    if name in {"span", "div"}:
+        return render_children(elem, ctx)
+    if name == "table":
+        return convert_table(elem, ctx)
     return None
+
+
+def convert_unknown(elem: ET.Element, ctx: LinkRewrite) -> str | None:
+    tag = elem.tag
+    if not isinstance(tag, str):
+        return None
+    namespaced = tag.startswith(f"{{{AC_NS}}}") or tag.startswith(f"{{{RI_NS}}}")
+    prefixed = tag.startswith("ac:") or tag.startswith("ri:")
+    if not namespaced and not prefixed:
+        return None
+    inner = render_children(elem, ctx).strip()
+    label = f"Placeholder: {local_name(tag)}"
+    if inner:
+        return f"{label}\n\n{inner}\n\n"
+    return label
+
+
+def table_rows(elem: ET.Element) -> list[list[ET.Element]]:
+    rows: list[list[ET.Element]] = []
+    for child in elem.iter():
+        if local_name(child.tag) == "tr":
+            rows.append(
+                [cell for cell in child if local_name(cell.tag) in {"th", "td"}]
+            )
+    return rows
+
+
+def is_simple_table(elem: ET.Element) -> bool:
+    rows = table_rows(elem)
+    if not rows or not rows[0]:
+        return False
+    width = len(rows[0])
+    for row in rows:
+        if len(row) != width:
+            return False
+        for cell in row:
+            if get_attr(cell, "colspan") or get_attr(cell, "rowspan"):
+                return False
+            if any(local_name(child.tag) in TABLE_BLOCK_CELLS for child in cell.iter()):
+                return False
+    return True
+
+
+def convert_table(elem: ET.Element, ctx: LinkRewrite) -> str:
+    if not is_simple_table(elem):
+        return emit_element(elem, ctx)
+    rows = table_rows(elem)
+    rendered = [
+        [
+            render_children(cell, ctx).strip().replace("\n", " ").replace("|", "\\|")
+            for cell in row
+        ]
+        for row in rows
+    ]
+    width = len(rendered[0])
+
+    def fmt(row: list[str]) -> str:
+        return "| " + " | ".join(row) + " |"
+
+    lines = [fmt(rendered[0]), "| " + " | ".join("---" for _ in range(width)) + " |"]
+    lines.extend(fmt(row) for row in rendered[1:])
+    return "\n".join(lines) + "\n\n"
 
 
 def render_children(elem: ET.Element, ctx: LinkRewrite) -> str:
@@ -538,6 +712,12 @@ def render_node(elem: ET.Element, ctx: LinkRewrite) -> str:
         converted = convert_page_link(elem, ctx)
     if converted is None:
         converted = convert_macro(elem, ctx)
+    if converted is None:
+        converted = convert_task_list(elem, ctx)
+    if converted is None:
+        converted = convert_html(elem, ctx)
+    if converted is None:
+        converted = convert_unknown(elem, ctx)
     if converted is None:
         converted = convert_anchor(elem, ctx)
     tail = esc_text(elem.tail) if elem.tail else ""
@@ -558,11 +738,20 @@ def emit_element(elem: ET.Element, ctx: LinkRewrite) -> str:
     return f"<{tag}{attrs}>{inner}</{tag}>"
 
 
+def omit_title_heading(markdown: str, title: str) -> str:
+    match = re.match(r"^#{1,6} (.+?)\n+", markdown.lstrip("\n"))
+    if match is None or match.group(1).strip() != title.strip():
+        return markdown
+    stripped = markdown.lstrip("\n")
+    return stripped[match.end() :]
+
+
 def rewrite_storage(
     storage: str,
     site: str,
     space_key: str,
     page_id: str,
+    title: str,
     note_dir: Path,
     note_paths: dict[str, Path],
     page_ids: dict[tuple[str, str], str],
@@ -576,7 +765,7 @@ def rewrite_storage(
         )
     except ET.ParseError:
         return storage
-    return render_children(
+    body = render_children(
         root,
         LinkRewrite(
             site,
@@ -590,6 +779,7 @@ def rewrite_storage(
             referenced,
         ),
     )
+    return omit_title_heading(body, title)
 
 
 def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
@@ -783,6 +973,7 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
                     site,
                     space_key,
                     page_id,
+                    title,
                     folder,
                     note_paths,
                     page_ids,
