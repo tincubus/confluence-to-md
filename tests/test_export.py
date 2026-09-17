@@ -278,7 +278,7 @@ def test_export_makes_sibling_folder_names_unique_ignoring_case(monkeypatch, tmp
         "<!-- confluence-to-md:children -->\n"
         "## Child pages\n"
         "- [Notes](Notes/Notes.md)\n"
-        "- [notes](notes%20%2811%29/notes%20%2811%29.md)\n"
+        "- [notes (11)](notes%20%2811%29/notes%20%2811%29.md)\n"
         "<!-- /confluence-to-md:children -->"
     ) in home
 
@@ -423,7 +423,7 @@ def test_export_rewrites_in_selection_page_link_to_relative_markdown(
     body = home.split("---", 2)[2]
 
     assert code == 0
-    assert "[the runbook](Run%20book/Run%20book.md)" in body
+    assert "[Run book](Run%20book/Run%20book.md)" in body
     assert "[[" not in body
     assert "ac:link" not in body
 
@@ -461,7 +461,7 @@ def test_export_keeps_heading_fragment_as_percent_encoded_text(monkeypatch, tmp_
     )
 
     assert code == 0
-    assert "[setup](Run%20book/Run%20book.md#Setup%20steps)" in body
+    assert "[Run book](Run%20book/Run%20book.md#Setup%20steps)" in body
     assert "setup-steps" not in body
 
 
@@ -670,7 +670,7 @@ def test_export_relative_page_links_do_not_contain_site_url(monkeypatch, tmp_pat
     )
 
     assert code == 0
-    assert "[home](../Home.md)" in body
+    assert "[Home](../Home.md)" in body
     assert f"]({site}" not in body.replace(f"[Run book]({site}", "", 1)
 
 
@@ -717,8 +717,7 @@ def test_export_rewrites_html_page_url_and_smart_link_url(
     )
 
     assert code == 0
-    assert converted.count("[run](Run%20book/Run%20book.md)") == 1
-    assert converted.count("[Run book](Run%20book/Run%20book.md)") == 1
+    assert converted.count("[Run book](Run%20book/Run%20book.md)") == 2
     assert f"[gone]({outside})" in converted
     assert "100" in captured.out
     assert outside in captured.out
@@ -779,7 +778,7 @@ def test_export_rewrites_page_link_across_spaces_in_selection(monkeypatch, tmp_p
     )
 
     assert code == 0
-    assert "[team](../../Team/Team%20Home/Team%20Home.md)" in body
+    assert "[Team Home](../../Team/Team%20Home/Team%20Home.md)" in body
 
 
 def test_export_rewrites_content_id_page_link(monkeypatch, tmp_path):
@@ -816,4 +815,42 @@ def test_export_rewrites_content_id_page_link(monkeypatch, tmp_path):
     )
 
     assert code == 0
-    assert "[run](Run%20book/Run%20book.md)" in converted
+    assert "[Run book](Run%20book/Run%20book.md)" in converted
+
+
+def test_export_external_content_id_url_includes_page_id(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    home_body = (
+        "<p>"
+        "<ac:link>"
+        '<ri:page ri:content-title="Outside" ri:space-key="ENG" />'
+        '<ri:content ri:id="999" />'
+        "<ac:plain-text-link-body><![CDATA[missing]]></ac:plain-text-link-body>"
+        "</ac:link>"
+        "</p>"
+    )
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("100", "Home", body=home_body)],
+            "_links": {},
+        },
+    }
+    vault = tmp_path / "vault"
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "ENG"])
+        outside = f"{site}/wiki/spaces/ENG/pages/999/Outside"
+
+    captured = capsys.readouterr()
+    body = (
+        (vault / "Engineering" / "Home" / "Home.md")
+        .read_text(encoding="utf-8")
+        .split("---", 2)[2]
+    )
+
+    assert code == 0
+    assert f"[missing]({outside})" in body
+    assert outside in captured.out
+    assert "100" in captured.out

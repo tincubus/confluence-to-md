@@ -240,10 +240,13 @@ class LinkRewrite:
     ) -> str:
         if page_id and page_id in self.note_paths:
             return relative_note_href(self.note_dir, self.note_paths[page_id], fragment)
-        href = (
-            f"{self.site}/wiki/spaces/{quote(space_key, safe='')}"
-            f"/pages/{quote(title, safe='')}"
-        )
+        href = f"{self.site}/wiki/spaces/{quote(space_key, safe='')}/pages/"
+        if page_id:
+            href += page_id
+            if title:
+                href += f"/{quote(title, safe='')}"
+        else:
+            href += quote(title, safe="")
         if fragment:
             href += "#" + quote(fragment, safe="")
         self.external_links.append((self.page_id, href))
@@ -253,6 +256,11 @@ class LinkRewrite:
         for (_, title), pid in self.page_ids.items():
             if pid == page_id:
                 return title
+        return fallback
+
+    def note_name(self, page_id: str | None, fallback: str) -> str:
+        if page_id and page_id in self.note_paths:
+            return self.note_paths[page_id].stem
         return fallback
 
 
@@ -288,7 +296,7 @@ def convert_page_link(elem: ET.Element, ctx: LinkRewrite) -> str | None:
             page_id = content_id
             title = ctx.title_of(page_id, title)
     href = ctx.page_href(target_space, title, page_id, get_attr(elem, "anchor"))
-    return f"[{link_label(elem, title)}]({href})"
+    return f"[{ctx.note_name(page_id, link_label(elem, title))}]({href})"
 
 
 PAGE_MACROS = {"include", "excerpt-include"}
@@ -315,9 +323,10 @@ def convert_href(ctx: LinkRewrite, href: str, label: str) -> str | None:
         return None
     _space_key, page_id, title, fragment = parsed
     title = ctx.title_of(page_id, title or page_id)
+    label = ctx.note_name(page_id, label or title)
     if page_id in ctx.note_paths:
         return (
-            f"[{label or title}]"
+            f"[{label}]"
             f"({relative_note_href(ctx.note_dir, ctx.note_paths[page_id], fragment)})"
         )
     absolute = (
@@ -326,7 +335,7 @@ def convert_href(ctx: LinkRewrite, href: str, label: str) -> str | None:
         else urljoin(ctx.site + "/", href)
     )
     ctx.external_links.append((ctx.page_id, absolute))
-    return f"[{label or title}]({absolute})"
+    return f"[{label}]({absolute})"
 
 
 def convert_anchor(elem: ET.Element, ctx: LinkRewrite) -> str | None:
@@ -361,7 +370,7 @@ def convert_macro(elem: ET.Element, ctx: LinkRewrite) -> str | None:
         if not title and page_id is None:
             return f"Placeholder: {name}"
         href = ctx.page_href(target_space, title, page_id, None)
-        return f"[{title}]({href})"
+        return f"[{ctx.note_name(page_id, title)}]({href})"
     if name in SMART_MACROS:
         url = macro_param(elem, "url")
         if not url:
@@ -553,7 +562,7 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
                     rel = (
                         f"{quote(child_name, safe='')}/{quote(child_name, safe='')}.md"
                     )
-                    lines.append(f"- [{child['title']}]({rel})")
+                    lines.append(f"- [{child_name}]({rel})")
                 lines.append("<!-- /confluence-to-md:children -->")
                 lines.append("")
             (folder / f"{folder_names[page_id]}.md").write_text(
