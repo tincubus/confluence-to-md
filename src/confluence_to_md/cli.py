@@ -112,7 +112,8 @@ def list_spaces(site: str) -> int:
     return 0
 
 
-# Emoji and pictographs, including ZWJ sequences and emoji presentation variants.
+# Emoji and pictographs, including Unicode 17.0 Extended_Pictographic ranges,
+# ZWJ sequences, keycaps, tag sequences, and emoji presentation variants.
 _PICTOGRAPH = (
     "["
     "\u00a9\u00ae"
@@ -135,6 +136,7 @@ _PICTOGRAPH = (
     "\u3030\u303d"
     "\u3297\u3299"
     "\U0001f000-\U0001faff"
+    "\U0001fc00-\U0001fffd"
     "]"
 )
 EMOJI = re.compile(
