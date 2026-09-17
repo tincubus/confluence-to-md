@@ -1,0 +1,27 @@
+{
+  "results": [
+    {
+      "id": "123456",
+      "status": "current",
+      "title": "Home",
+      "spaceId": "111",
+      "parentId": null,
+      "createdAt": "2026-09-17T04:00:00.000Z",
+      "version": {
+        "createdAt": "2026-09-17T04:00:00Z",
+        "number": 1,
+        "minorEdit": false
+      },
+      "body": {
+        "storage": {
+          "representation": "storage",
+          "value": "<p>Welcome</p>"
+        }
+      },
+      "_links": {
+        "webui": "/spaces/ENG/pages/123456/Home"
+      }
+    }
+  ],
+  "_links": {}
+}

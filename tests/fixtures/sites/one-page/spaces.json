@@ -1,0 +1,12 @@
+{
+  "results": [
+    {
+      "id": "111",
+      "key": "ENG",
+      "name": "Engineering",
+      "type": "global",
+      "status": "current"
+    }
+  ],
+  "_links": {}
+}
