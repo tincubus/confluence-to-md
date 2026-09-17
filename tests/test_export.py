@@ -112,6 +112,7 @@ def test_export_writes_one_note_for_one_page(monkeypatch, tmp_path, capsys):
     assert "parent_id:" not in text
     assert "labels:" not in text
     assert body.splitlines()[0] == f"[Home]({source_url})"
+    assert "Welcome" in body
     assert EMAIL not in captured.out + captured.err
     assert TOKEN not in captured.out + captured.err
     assert EMAIL not in text

@@ -173,6 +173,8 @@ def export_space(site: str, vault: str, space_key: str) -> int:
         lines.append("")
         lines.append(f"[{title}]({source_url})")
         lines.append("")
+        lines.append(page["body"]["storage"]["value"])
+        lines.append("")
         (folder / f"{title}.md").write_text("\n".join(lines), encoding="utf-8")
     return 0
 
