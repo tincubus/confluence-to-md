@@ -55,13 +55,32 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument(
         "space_keys",
         metavar="space_key",
-        nargs="+",
+        nargs="*",
         help="Space key to Export. Repeat for several Spaces in one Vault.",
+    )
+    export_parser.add_argument(
+        "--page",
+        dest="page_id",
+        metavar="page_id",
+        help="Page id to Export, with that Page's descendants.",
     )
     args = parser.parse_args(argv)
     if args.command == "list":
         return list_spaces(args.site)
-    return export_spaces(args.site, args.vault, args.space_keys)
+    if args.page_id and args.space_keys:
+        print(
+            "Could not Export the Selection: a Space key and a Page id "
+            "cannot be used together",
+            file=sys.stderr,
+        )
+        return 1
+    if not args.page_id and not args.space_keys:
+        print(
+            "Could not Export the Selection: a Space key or a Page id is required",
+            file=sys.stderr,
+        )
+        return 1
+    return export_selection(args.site, args.vault, args.space_keys, args.page_id)
 
 
 def load_credentials() -> tuple[str, str] | None:
@@ -258,6 +277,24 @@ def esc_text(value: str) -> str:
 
 def esc_attr(value: str) -> str:
     return esc_text(value).replace('"', "&quot;")
+
+
+def pages_in_selection(pages: list[dict], root_id: str) -> list[dict]:
+    children_of: dict[str, list[str]] = {}
+    ids = {str(page["id"]) for page in pages}
+    for page in pages:
+        parent_id = page.get("parentId")
+        if parent_id:
+            children_of.setdefault(str(parent_id), []).append(str(page["id"]))
+    chosen: set[str] = set()
+    stack = [root_id]
+    while stack:
+        current = stack.pop()
+        if current in chosen or current not in ids:
+            continue
+        chosen.add(current)
+        stack.extend(children_of.get(current, []))
+    return [page for page in pages if str(page["id"]) in chosen]
 
 
 def page_path_parts(
@@ -782,7 +819,9 @@ def rewrite_storage(
     return omit_title_heading(body, title)
 
 
-def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
+def export_selection(
+    site: str, vault: str, space_keys: list[str], page_id: str | None
+) -> int:
     account = load_credentials()
     if account is None:
         return 1
@@ -851,21 +890,51 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
     page_ids: dict[tuple[str, str], str] = {}
     prepared: list[tuple] = []
     downloaded_count = 0
-    for space_key in space_keys:
+    selected_page: dict | None = None
+    selected_space: dict | None = None
+    if page_id:
         try:
-            spaces = fetch_json(
-                f"{site}/wiki/api/v2/spaces?keys={quote(space_key, safe='')}&limit=250"
+            selected_page = fetch_json(
+                f"{site}/wiki/api/v2/pages/{quote(page_id, safe='')}"
             )
-            space = next(
-                (item for item in spaces["results"] if item["key"] == space_key),
+            space_id = str(selected_page["spaceId"])
+            spaces = fetch_json(
+                f"{site}/wiki/api/v2/spaces?ids={quote(space_id, safe='')}&limit=250"
+            )
+            selected_space = next(
+                (item for item in spaces["results"] if str(item["id"]) == space_id),
                 None,
             )
-            if space is None:
+            if selected_space is None:
                 print(
-                    f"Could not Export the Selection: Space {space_key} was not found",
+                    "Could not Export the Selection: Space was not found",
                     file=sys.stderr,
                 )
                 return 1
+            space_keys = [selected_space["key"]]
+        except urllib.error.URLError as err:
+            print(f"Could not Export the Selection: {err.reason}", file=sys.stderr)
+            return 1
+    for space_key in space_keys:
+        try:
+            if selected_space is None:
+                spaces = fetch_json(
+                    f"{site}/wiki/api/v2/spaces?keys="
+                    f"{quote(space_key, safe='')}&limit=250"
+                )
+                space = next(
+                    (item for item in spaces["results"] if item["key"] == space_key),
+                    None,
+                )
+                if space is None:
+                    print(
+                        "Could not Export the Selection: "
+                        f"Space {space_key} was not found",
+                        file=sys.stderr,
+                    )
+                    return 1
+            else:
+                space = selected_space
             pages = fetch_json(
                 f"{site}/wiki/api/v2/spaces/{space['id']}/pages"
                 "?body-format=storage&limit=250"
@@ -878,10 +947,16 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
             space["name"], space_key, used_space_folders
         )
         space_folder.mkdir(parents=True, exist_ok=True)
-        pages_by_id = {str(page["id"]): page for page in pages["results"]}
+        space_pages = pages["results"]
+        if selected_page is not None:
+            selected_id = str(selected_page["id"])
+            if not any(str(page["id"]) == selected_id for page in space_pages):
+                space_pages = [selected_page, *space_pages]
+            space_pages = pages_in_selection(space_pages, selected_id)
+        pages_by_id = {str(page["id"]): page for page in space_pages}
         children_of: dict[str, list[dict]] = {}
         roots: list[dict] = []
-        for page in pages["results"]:
+        for page in space_pages:
             parent_id = page.get("parentId")
             if parent_id and str(parent_id) in pages_by_id:
                 children_of.setdefault(str(parent_id), []).append(page)
@@ -895,16 +970,14 @@ def export_spaces(site: str, vault: str, space_keys: list[str]) -> int:
                 page_id = str(page["id"])
                 folder_names[page_id] = folder_name(page["title"], page_id, used)
         folders: dict[str, Path] = {}
-        for page in pages["results"]:
+        for page in space_pages:
             page_id = str(page["id"])
             parts = page_path_parts(page, pages_by_id, folder_names)
             folder = space_folder / Path(*parts)
             folders[page_id] = folder
             note_paths[page_id] = folder / f"{parts[-1]}.md"
             page_ids[(space_key, page["title"])] = page_id
-        prepared.append(
-            (space_key, pages["results"], children_of, folder_names, folders)
-        )
+        prepared.append((space_key, space_pages, children_of, folder_names, folders))
     for space_key, space_pages, children_of, folder_names, folders in prepared:
         for page in space_pages:
             title = page["title"]

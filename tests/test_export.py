@@ -577,6 +577,89 @@ def test_export_places_page_under_space_when_parent_is_outside_selection(
     assert not (vault / "Engineering" / "Home").exists()
 
 
+def test_export_fails_when_space_key_and_page_id_are_both_given(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    vault = tmp_path / "vault"
+
+    with serve_site(hierarchy_routes()) as site:
+        code = main(["export", site, str(vault), "ENG", "--page", "200"])
+
+    captured = capsys.readouterr()
+    assert code != 0
+    assert EMAIL not in captured.out + captured.err
+    assert TOKEN not in captured.out + captured.err
+    assert not vault.exists() or not any(vault.rglob("*.md"))
+
+
+def test_export_by_page_id_writes_that_page_and_descendants_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    vault = tmp_path / "vault"
+    routes = hierarchy_routes()
+    routes["/wiki/api/v2/pages/200"] = make_page(
+        "200", "Alpha", parent_id="100", position=1
+    )
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "--page", "200"])
+
+    alpha = vault / "Engineering" / "Alpha" / "Alpha.md"
+    grand = vault / "Engineering" / "Alpha" / "Grand" / "Grand.md"
+    alpha_text = alpha.read_text(encoding="utf-8")
+    grand_text = grand.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert alpha.is_file()
+    assert grand.is_file()
+    assert 'parent_id: "100"' in alpha_text
+    assert 'parent_id: "200"' in grand_text
+    assert (
+        "<!-- confluence-to-md:children -->\n"
+        "## Child pages\n"
+        "- [Grand](Grand/Grand.md)\n"
+        "<!-- /confluence-to-md:children -->"
+    ) in alpha_text
+    assert "confluence-to-md:children" not in grand_text
+    assert not (vault / "Engineering" / "Home").exists()
+    assert not (vault / "Engineering" / "Run book").exists()
+    assert {path.relative_to(vault) for path in vault.rglob("*.md")} == {
+        Path("Engineering/Alpha/Alpha.md"),
+        Path("Engineering/Alpha/Grand/Grand.md"),
+    }
+
+
+def test_export_by_page_id_writes_page_omitted_from_space_listing(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
+    monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
+    vault = tmp_path / "vault"
+    routes = {
+        "/wiki/api/v2/spaces": load_json("one-page/spaces.json"),
+        "/wiki/api/v2/spaces/111/pages": {
+            "results": [make_page("400", "Grand", parent_id="200", position=0)],
+            "_links": {},
+        },
+        "/wiki/api/v2/pages/200": make_page(
+            "200", "Alpha", parent_id="100", position=1
+        ),
+    }
+
+    with serve_site(routes) as site:
+        code = main(["export", site, str(vault), "--page", "200"])
+
+    alpha = vault / "Engineering" / "Alpha" / "Alpha.md"
+    grand = vault / "Engineering" / "Alpha" / "Grand" / "Grand.md"
+
+    assert code == 0
+    assert alpha.is_file()
+    assert grand.is_file()
+    assert 'parent_id: "100"' in alpha.read_text(encoding="utf-8")
+
+
 def test_export_creates_space_folder_without_inventing_homepage(monkeypatch, tmp_path):
     monkeypatch.setenv("CONFLUENCE_EMAIL", EMAIL)
     monkeypatch.setenv("CONFLUENCE_API_TOKEN", TOKEN)
